@@ -107,11 +107,6 @@ static int audio_open(PlayerAudio *audio, int rate, int channels)
         SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, NULL, NULL);
     if (audio->stream == NULL)
         return -1;
-    if (!SDL_ResumeAudioStreamDevice(audio->stream)) {
-        SDL_DestroyAudioStream(audio->stream);
-        audio->stream = NULL;
-        return -1;
-    }
 #else
     spec.freq = rate;
     spec.format = AUDIO_S16SYS;
@@ -121,8 +116,9 @@ static int audio_open(PlayerAudio *audio, int rate, int channels)
     audio->device = SDL_OpenAudioDevice(NULL, 0, &spec, NULL, 0);
     if (audio->device == 0)
         return -1;
-    SDL_PauseAudioDevice(audio->device, 0);
 #endif
+    /* Stay paused until the first packet is queued. An empty running
+       device crackles until that packet arrives. */
     audio->ready = 1;
     return 0;
 }
@@ -299,12 +295,6 @@ static int append_pcm(unsigned char **stream, unsigned long *length,
     return 0;
 }
 
-#ifdef BINK_USE_SDL3
-typedef Uint64 PlayerTicks;
-#else
-typedef Uint32 PlayerTicks;
-#endif
-
 /* Handle quit, escape, and space. Put every other event back. */
 static int poll_wait_input(int *quit, int *paused, PlayerAudio *audio,
                            int *device_paused)
@@ -345,34 +335,39 @@ static int poll_wait_input(int *quit, int *paused, PlayerAudio *audio,
     return stop;
 }
 
-/* Wait until one video frame of PCM has left the queue. The rest of a
-   burst stays queued. A queue that does not fall for half a second lets
-   the picture advance so a stalled device cannot wedge the window. */
-static void wait_for_audio(PlayerAudio *audio, double usf, int *quit,
-                           int *paused, int *device_paused)
+/* Hold this picture until `deadline` milliseconds. One picture is
+   bink_frame_bytes of audio. The device reports that loss in whole
+   buffers, which are larger than the leftover of a frame, so waiting
+   until the counter crosses the threshold plays longer than a picture
+   and the cushion drains. An empty queue returns at once: sleeping
+   would only widen the hole. */
+static void wait_for_audio(PlayerAudio *audio, double usf, Uint64 deadline,
+                           int *quit, int *paused, int *device_paused)
 {
     unsigned long frame_bytes = bink_frame_bytes(
         (unsigned long)audio->rate, audio->channels, usf);
     unsigned long mark = audio_queued(audio);
-    unsigned long last_queued = mark;
-    PlayerTicks last_change = SDL_GetTicks();
 
-    while (bink_audio_waiting(mark, audio_queued(audio), frame_bytes)) {
+    for (;;) {
         unsigned long queued;
-        PlayerTicks now;
+        Uint64 now;
+        Uint64 left;
 
+        now = SDL_GetTicks();
+        if (now >= deadline)
+            return;
         if (poll_wait_input(quit, paused, audio, device_paused))
             return;
-
         queued = audio_queued(audio);
-        now = SDL_GetTicks();
-        if (queued < last_queued) {
-            last_queued = queued;
-            last_change = now;
-        } else if ((PlayerTicks)(now - last_change) > 500) {
+        if (!bink_audio_waiting(mark, queued, frame_bytes) && queued == 0)
             return;
-        }
-        SDL_Delay(5);
+        now = SDL_GetTicks();
+        if (now >= deadline)
+            return;
+        left = deadline - now;
+        if (left > 5)
+            left = 5;
+        SDL_Delay((Uint32)left);
     }
 }
 
@@ -503,6 +498,8 @@ int main(int argc, char **argv)
     int quit = 0;
     int paused = 0;
     int device_paused = 0;
+    double picture_ms = 0.0;
+    double next_due = 0.0;
     int redraw = 1;
     int headless = 0;
     int exit_code = 0;
@@ -577,6 +574,8 @@ int main(int argc, char **argv)
             audio_inited = 1;
             if (audio_open(&audio, audio.rate, audio.channels) != 0)
                 fprintf(stderr, "%s\n", SDL_GetError());
+            else
+                device_paused = 1;
         }
     }
 
@@ -727,6 +726,7 @@ int main(int argc, char **argv)
                                       rates) == 0) {
                         redraw = 1;
                         need_audio = 0;
+                        next_due = 0.0;
                     }
                 }
             }
@@ -759,9 +759,28 @@ int main(int argc, char **argv)
         if (status == BINK_LAST)
             break;
 
-        if (audio.ready && test_frames == 0)
-            wait_for_audio(&audio, usf, &quit, &paused, &device_paused);
-        else if (!headless)
+        if (audio.ready && test_frames == 0) {
+            double now = (double)SDL_GetTicks();
+
+            if (picture_ms == 0.0) {
+                unsigned long frame_bytes = bink_frame_bytes(
+                    (unsigned long)audio.rate, audio.channels, usf);
+                double byte_rate = (double)audio.rate *
+                                   (double)audio.channels * 2.0;
+
+                picture_ms = frame_ms;
+                if (frame_bytes > 0 && byte_rate > 0.0)
+                    picture_ms = (double)frame_bytes / byte_rate * 1000.0;
+            }
+            if (next_due == 0.0)
+                next_due = now;
+            else if (now - next_due > picture_ms)
+                next_due = now;
+            next_due += picture_ms;
+            if (next_due > now)
+                wait_for_audio(&audio, usf, (Uint64)(next_due + 0.5),
+                               &quit, &paused, &device_paused);
+        } else if (!headless)
             wait_until((double)SDL_GetTicks() + frame_ms);
 
         if (quit)
