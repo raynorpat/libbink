@@ -19,7 +19,7 @@ capture_one() {
   fi
   rm -f "$OUT/$name.wav"
   "$VLC" -I dummy --no-video --play-and-exit \
-    --sout "#transcode{acodec=s16l,channels=2,samplerate=44100}:std{access=file,mux=wav,dst=$OUT/$name.wav}" \
+    --sout "#transcode{acodec=s16l}:std{access=file,mux=wav,dst=$OUT/$name.wav}" \
     "$src" >/dev/null 2>&1 || true
   test -s "$OUT/$name.wav"
 }
