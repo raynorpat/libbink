@@ -15,6 +15,9 @@ typedef struct {
     unsigned char bitdepth;
     unsigned short flags;
     unsigned long max_decoded;
+    struct BinkAudio *decoder;
+    const unsigned char *payload;
+    unsigned long payload_size;
 } BinkAudioTrack;
 
 struct bink_t {

@@ -16,12 +16,9 @@ static void w32(unsigned char *p, unsigned long v)
     p[3] = (unsigned char)((v >> 24) & 0xFF);
 }
 
-static int test_synthetic_max_decoded(void)
+static void fill_one_track(unsigned char *buf)
 {
-    unsigned char buf[68];
-    bink b;
-
-    memset(buf, 0, sizeof(buf));
+    memset(buf, 0, 68);
     memcpy(buf, "BIKi", 4);
     w32(buf + 4, 60);          /* file size field: buffer length minus 8 */
     w32(buf + 8, 1);           /* one frame */
@@ -37,11 +34,46 @@ static int test_synthetic_max_decoded(void)
     w32(buf + 52, 0);          /* track id */
     w32(buf + 56, 60);         /* frame 0 offset */
     w32(buf + 60, 4);          /* 4-byte audio chunk, empty video tail */
+}
 
+static int test_synthetic_max_decoded(void)
+{
+    unsigned char buf[68];
+    bink b;
+
+    fill_one_track(buf);
     b = bink_open_memory(buf, sizeof(buf));
     CHECK(b != NULL);
     CHECK(b->audio_tracks == 1);
     CHECK(b->audio[0].max_decoded == 134400);
+    bink_close(b);
+    return 0;
+}
+
+static int test_enable_without_pcm(void)
+{
+    unsigned char buf[68];
+    char status;
+    bink b;
+
+    CHECK(bink_enable_audio(NULL, 0, 1) == -1);
+
+    fill_one_track(buf);
+    b = bink_open_memory(buf, sizeof(buf));
+    CHECK(b != NULL);
+    CHECK(bink_enable_audio(b, 1, 1) == -1);
+    CHECK(bink_enable_audio(b, 0, 1) == 0);
+    CHECK(bink_get_audio(b, 0) == NULL);
+    CHECK(bink_get_audio_size(b, 0) == 0);
+
+    status = bink_first(b);
+    CHECK(status == BINK_MORE || status == BINK_LAST);
+    CHECK(bink_get_audio(b, 0) == NULL);
+    CHECK(bink_get_audio_size(b, 0) == 0);
+
+    CHECK(bink_enable_audio(b, 0, 0) == 0);
+    status = bink_first(b);
+    CHECK(status != BINK_ERROR);
     bink_close(b);
     return 0;
 }
@@ -80,12 +112,26 @@ static int test_real_max_decoded(void)
         return 1;
     if (expect_max_decoded("Robotica_1080_bink_4100k.bik", 0, 0) != 0)
         return 1;
+
+    {
+        char path[1024];
+        bink b;
+
+        snprintf(path, sizeof(path), "%s/Robotica_1080_bink_4100k.bik",
+                 test_media_dir());
+        b = bink_open_file(path, BINK_MODE_DISK);
+        CHECK(b != NULL);
+        CHECK(bink_enable_audio(b, 0, 1) == -1);
+        bink_close(b);
+    }
     return 0;
 }
 
 int main(void)
 {
     if (test_synthetic_max_decoded() != 0)
+        return 1;
+    if (test_enable_without_pcm() != 0)
         return 1;
     if (test_real_max_decoded() != 0)
         return 1;

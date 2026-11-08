@@ -1,3 +1,4 @@
+#include "bink_audio.h"
 #include "bink_internal.h"
 
 #include <stdio.h>
@@ -57,6 +58,8 @@ static int read_u32(BinkReader *r, unsigned long *out)
 
 static void bink_free(bink b)
 {
+    int i;
+
     if (b == NULL)
         return;
     if (b->owns_file && b->file)
@@ -65,6 +68,8 @@ static void bink_free(bink b)
         bink_video_uninit(b->video);
         free(b->video);
     }
+    for (i = 0; i < b->audio_tracks; i++)
+        bink_audio_destroy(b->audio[i].decoder);
     free(b->frame_offsets);
     free(b->frame_sizes);
     free(b->frame_keyframes);
@@ -436,6 +441,8 @@ static int bink_read_frame_chunk(bink object, unsigned long index)
         audio_size = get_le32(object->frame_data + pos);
         if (audio_size > size - pos - 4)
             return -1;
+        object->audio[i].payload = object->frame_data + pos + 4;
+        object->audio[i].payload_size = audio_size;
         pos += 4 + audio_size;
     }
 
@@ -470,12 +477,47 @@ char bink_enable_video(bink object, unsigned char enable)
 
 char bink_enable_audio(bink object, unsigned char track, unsigned char enable)
 {
-    (void)track;
-    (void)enable;
+    BinkAudio *audio;
 
-    if (object == NULL)
+    if (object == NULL || track >= object->audio_tracks)
         return -1;
+    if (!enable) {
+        bink_audio_destroy(object->audio[track].decoder);
+        object->audio[track].decoder = NULL;
+        return 0;
+    }
+    if (bink_audio_create(&audio, object->audio[track].rate,
+                          object->audio[track].channels,
+                          (object->audio[track].flags & 0x1000) != 0,
+                          object->audio[track].max_decoded) != 0)
+        return -1;
+    bink_audio_destroy(object->audio[track].decoder);
+    object->audio[track].decoder = audio;
     return 0;
+}
+
+static void bink_reset_audio(bink object)
+{
+    int i;
+
+    for (i = 0; i < object->audio_tracks; i++) {
+        if (object->audio[i].decoder != NULL)
+            bink_audio_reset(object->audio[i].decoder);
+    }
+}
+
+static void bink_decode_enabled_audio(bink object)
+{
+    int i;
+
+    for (i = 0; i < object->audio_tracks; i++) {
+        BinkAudio *audio = object->audio[i].decoder;
+
+        if (audio == NULL)
+            continue;
+        (void)bink_audio_decode(audio, object->audio[i].payload,
+                                object->audio[i].payload_size);
+    }
 }
 
 static int bink_decode_current_video(bink object)
@@ -499,6 +541,8 @@ char bink_first(bink object)
     object->current_frame = 0;
     if (bink_decode_current_video(object) != 0)
         return BINK_ERROR;
+    bink_reset_audio(object);
+    bink_decode_enabled_audio(object);
     return (object->frame_count == 1) ? BINK_LAST : BINK_MORE;
 }
 
@@ -517,6 +561,7 @@ char bink_next(bink object)
     object->current_frame = next;
     if (bink_decode_current_video(object) != 0)
         return BINK_ERROR;
+    bink_decode_enabled_audio(object);
     return (next + 1 == object->frame_count) ? BINK_LAST : BINK_MORE;
 }
 
@@ -535,6 +580,8 @@ char bink_seek_keyframe(bink object, unsigned long frame)
     object->current_frame = frame;
     if (bink_decode_current_video(object) != 0)
         return -1;
+    bink_reset_audio(object);
+    bink_decode_enabled_audio(object);
     return 0;
 }
 
@@ -567,14 +614,21 @@ int bink_get_stride(const bink object, int plane)
 
 const unsigned char *bink_get_audio(const bink object, unsigned char track)
 {
-    (void)object;
-    (void)track;
-    return NULL;
+    BinkAudio *audio;
+
+    if (object == NULL || track >= object->audio_tracks)
+        return NULL;
+    audio = object->audio[track].decoder;
+    if (audio == NULL || bink_audio_pcm_bytes(audio) == 0)
+        return NULL;
+    return bink_audio_pcm(audio);
 }
 
 unsigned long bink_get_audio_size(const bink object, unsigned char track)
 {
-    (void)object;
-    (void)track;
-    return 0;
+    if (object == NULL || track >= object->audio_tracks)
+        return 0;
+    if (object->audio[track].decoder == NULL)
+        return 0;
+    return bink_audio_pcm_bytes(object->audio[track].decoder);
 }

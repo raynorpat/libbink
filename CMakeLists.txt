@@ -24,16 +24,21 @@ function(bink_set_compile_settings target)
 endfunction()
 
 if(BINK_BUILD_STATIC)
-  add_library(bink_static STATIC src/bink.c src/bink_bits.c src/bink_dsp.c src/bink_video.c)
+  add_library(bink_static STATIC src/bink.c src/bink_bits.c src/bink_dsp.c
+              src/bink_video.c src/bink_audio.c)
   bink_set_compile_settings(bink_static)
   target_include_directories(bink_static PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
   set_target_properties(bink_static PROPERTIES OUTPUT_NAME bink)
+  if(NOT MSVC)
+    target_link_libraries(bink_static PUBLIC m)
+  endif()
 endif()
 
 if(BINK_BUILD_SHARED)
-  add_library(bink_shared SHARED src/bink.c src/bink_bits.c src/bink_dsp.c src/bink_video.c)
+  add_library(bink_shared SHARED src/bink.c src/bink_bits.c src/bink_dsp.c
+              src/bink_video.c src/bink_audio.c)
   bink_set_compile_settings(bink_shared)
   target_include_directories(bink_shared PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
@@ -43,6 +48,9 @@ if(BINK_BUILD_SHARED)
     VERSION ${PROJECT_VERSION}
     SOVERSION 0
     WINDOWS_EXPORT_ALL_SYMBOLS ON)
+  if(NOT MSVC)
+    target_link_libraries(bink_shared PUBLIC m)
+  endif()
 endif()
 
 if(BINK_BUILD_SHARED)
