@@ -2,6 +2,7 @@
 #define LIBBINK_INTERNAL_H
 
 #include "bink.h"
+#include "bink_video.h"
 
 #define BINK_MAX_AUDIO_TRACKS 7
 #define BINK_MAX_FRAMES 1000000UL
@@ -50,6 +51,7 @@ struct bink_t {
     /* playback state */
     unsigned long current_frame;
     unsigned char video_enabled;
+    BinkVideo *video;
 };
 
 #endif

@@ -21,3 +21,7 @@ add_test(NAME dsp COMMAND test_dsp)
 add_executable(test_bundles test_bundles.c)
 target_link_libraries(test_bundles PRIVATE ${BINK_LINK_TARGET})
 add_test(NAME bundles COMMAND test_bundles)
+
+add_executable(test_decode test_decode.c)
+target_link_libraries(test_decode PRIVATE ${BINK_LINK_TARGET})
+add_test(NAME decode COMMAND test_decode)

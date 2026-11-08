@@ -61,6 +61,10 @@ static void bink_free(bink b)
         return;
     if (b->owns_file && b->file)
         fclose(b->file);
+    if (b->video) {
+        bink_video_uninit(b->video);
+        free(b->video);
+    }
     free(b->frame_offsets);
     free(b->frame_sizes);
     free(b->frame_keyframes);
@@ -439,7 +443,23 @@ char bink_enable_video(bink object, unsigned char enable)
 {
     if (object == NULL)
         return -1;
-    object->video_enabled = enable ? 1 : 0;
+    if (enable) {
+        if (object->video == NULL) {
+            BinkVideo *video = (BinkVideo *)calloc(1, sizeof(*video));
+
+            if (video == NULL)
+                return -1;
+            if (bink_video_init(video, object->width, object->height,
+                                object->flags, object->version) != 0) {
+                free(video);
+                return -1;
+            }
+            object->video = video;
+        }
+        object->video_enabled = 1;
+    } else {
+        object->video_enabled = 0;
+    }
     return 0;
 }
 
@@ -453,13 +473,27 @@ char bink_enable_audio(bink object, unsigned char track, unsigned char enable)
     return 0;
 }
 
+static int bink_decode_current_video(bink object)
+{
+    if (!object->video_enabled || object->video == NULL)
+        return 0;
+    if (object->video_size == 0)
+        return -1;
+    return bink_video_decode(object->video, object->video_data,
+                             (size_t)object->video_size);
+}
+
 char bink_first(bink object)
 {
     if (object == NULL)
         return BINK_ERROR;
     if (bink_read_frame_chunk(object, 0) != 0)
         return BINK_ERROR;
+    if (object->video)
+        bink_video_reset(object->video);
     object->current_frame = 0;
+    if (bink_decode_current_video(object) != 0)
+        return BINK_ERROR;
     return (object->frame_count == 1) ? BINK_LAST : BINK_MORE;
 }
 
@@ -476,6 +510,8 @@ char bink_next(bink object)
     if (bink_read_frame_chunk(object, next) != 0)
         return BINK_ERROR;
     object->current_frame = next;
+    if (bink_decode_current_video(object) != 0)
+        return BINK_ERROR;
     return (next + 1 == object->frame_count) ? BINK_LAST : BINK_MORE;
 }
 
@@ -489,6 +525,10 @@ char bink_seek_keyframe(bink object, unsigned long frame)
         frame--;
     if (bink_read_frame_chunk(object, frame) != 0)
         return -1;
+    if (object->video)
+        bink_video_reset(object->video);
     object->current_frame = frame;
+    if (bink_decode_current_video(object) != 0)
+        return -1;
     return 0;
 }
