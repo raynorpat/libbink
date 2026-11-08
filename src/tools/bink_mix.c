@@ -46,6 +46,8 @@ static int resample(const BinkMixTrack *track, unsigned long frame,
     int right;
 
     pos = (double)frame * (double)track->rate / (double)out_rate;
+    if (pos >= (double)track->samples)
+        return 0;
     if (track->samples == 1 || pos >= (double)(track->samples - 1))
         return sample_at(track, track->samples - 1, out_channels, channel);
 
@@ -59,6 +61,46 @@ static int resample(const BinkMixTrack *track, unsigned long frame,
 static int track_contributes(const BinkMixTrack *track)
 {
     return track->pcm != NULL && track->samples > 0;
+}
+
+unsigned long bink_frame_bytes(unsigned long rate, int channels, double usf)
+{
+    double bytes;
+
+    if (rate == 0 || channels <= 0 || usf <= 0.0)
+        return 0;
+    bytes = (double)rate * (double)channels * 2.0 * usf / 1000000.0;
+    if (bytes < 1.0)
+        return 1;
+    return (unsigned long)(bytes + 0.5);
+}
+
+int bink_audio_waiting(unsigned long queued_at_mark, unsigned long queued_now,
+                       unsigned long frame_bytes)
+{
+    if (frame_bytes == 0 || queued_now == 0)
+        return 0;
+    if (queued_now >= queued_at_mark)
+        return 1;
+    return (queued_at_mark - queued_now) < frame_bytes;
+}
+
+unsigned long bink_soundtrack_offset(unsigned long rate, int channels,
+                                     double usf, unsigned long frame)
+{
+    double bytes;
+    unsigned long offset;
+    unsigned long step;
+
+    if (rate == 0 || channels <= 0 || usf <= 0.0)
+        return 0;
+    bytes = (double)rate * (double)channels * 2.0 * (double)frame * usf /
+            1000000.0;
+    offset = (unsigned long)(bytes + 0.5);
+    step = (unsigned long)channels * 2u;
+    if (step > 1)
+        offset -= offset % step;
+    return offset;
 }
 
 int bink_mix(const BinkMixTrack *tracks, int count,

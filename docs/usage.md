@@ -295,18 +295,22 @@ bink_dump --frames 3 video.bik outdir
 bink_sdl_player video.bik
 ```
 
-Keys: Esc or Q quits, Space pauses, Left/Right seeks one second. A seek
-walks back to the nearest keyframe, clears the audio queue, and then
-decodes forward to the target frame.
+Keys: Esc or Q quits, Space pauses the picture and the sound, Left/Right
+seeks one second. A seek clears the audio queue, walks forward from the
+nearest keyframe, and queues the soundtrack from that picture's time
+forward. Samples that belonged under earlier pictures are left out.
 
 The player enables every track in the file. It opens one device at the
 first enabled track's sample rate, in stereo when any enabled track is
 stereo and in mono otherwise. Each track is resampled with linear
 interpolation and the samples are summed with signed 16-bit saturation.
-While the device is open, the next picture waits until no more than two
-video frames of PCM are queued. If the device cannot be opened, the player
-prints the SDL error and the video continues without sound. A file with no
-audio tracks does not open a device.
+While the device is open, the next picture waits until one video frame of
+PCM has been played. A burst stays queued and keeps playing under the
+later pictures, including pictures whose chunk is empty. An empty chunk
+adds no samples and no silence. If the queue is not draining, the picture
+advances anyway so a stalled device cannot freeze the window. If the
+device cannot be opened, the player prints the SDL error and the video
+continues without sound. A file with no audio tracks does not open a device.
 
 Setting `BINK_SDL_TEST_FRAMES` to a positive integer makes the player exit
 successfully after decoding that many frames, which the CTest suite uses

@@ -74,8 +74,8 @@ Full documentation is in `docs/usage.md`.
 ## Tools
 
 - `bink_sdl_player video.bik` - SDL3 (preferred) or SDL2 playback.
-  Enables every audio track and mixes them. Esc/Q quits, Space pauses,
-  Left/Right seek one second.
+  Enables every audio track and mixes them. Esc/Q quits, Space pauses the
+  picture and the sound, Left/Right seek one second.
 - `bink_dump [--frames N] video.bik [outdir]` - headless PPM frame dump and
   checksums. Writes `frame_%05u.ppm` (P6) files.
 

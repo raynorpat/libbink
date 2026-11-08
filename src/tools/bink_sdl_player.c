@@ -11,7 +11,8 @@
  * Usage:
  *   bink_sdl_player file.bik
  *
- * Keys: Esc/q quit, Space pause, Left/Right seek one second.
+ * Keys: Esc/q quit, Space pauses the picture and the sound,
+ * Left/Right seek one second.
  */
 
 #include "bink.h"
@@ -177,10 +178,28 @@ static void audio_queue(PlayerAudio *audio, const void *data, unsigned long byte
 #endif
 }
 
-static void publish_audio(bink object, const int enabled[7],
-                          const unsigned char track_channels[7],
-                          const unsigned long track_rates[7],
-                          PlayerAudio *audio, unsigned long *total_bytes)
+static void audio_set_paused(PlayerAudio *audio, int pause_on, int *device_paused)
+{
+    if (!audio->ready || pause_on == *device_paused)
+        return;
+#ifdef BINK_USE_SDL3
+    if (pause_on)
+        (void)SDL_PauseAudioStreamDevice(audio->stream);
+    else
+        (void)SDL_ResumeAudioStreamDevice(audio->stream);
+#else
+    SDL_PauseAudioDevice(audio->device, pause_on ? 1 : 0);
+#endif
+    *device_paused = pause_on;
+}
+
+/* Mix the current frame into mix_pcm. Returns the byte count. A NULL
+   total_bytes skips the test counter. */
+static unsigned long mix_current(bink object, const int enabled[7],
+                                 const unsigned char track_channels[7],
+                                 const unsigned long track_rates[7],
+                                 const PlayerAudio *audio,
+                                 unsigned long *total_bytes)
 {
     BinkMixTrack tracks[7];
     unsigned long frames_out = 0;
@@ -196,7 +215,8 @@ static void publish_audio(bink object, const int enabled[7],
         if (!enabled[i])
             continue;
         size = bink_get_audio_size(object, (unsigned char)i);
-        *total_bytes += size;
+        if (total_bytes != NULL)
+            *total_bytes += size;
         if (size > 0 && track_channels[i] > 0) {
             samples = size / ((unsigned long)track_channels[i] * sizeof(int16_t));
             pcm = bink_get_audio(object, (unsigned char)i);
@@ -219,7 +239,7 @@ static void publish_audio(bink object, const int enabled[7],
         count++;
     }
     if (count == 0 || frames_out == 0 || audio->channels <= 0)
-        return;
+        return 0;
 
     samples_out = frames_out * (unsigned long)audio->channels;
     if (samples_out > mix_cap) {
@@ -227,45 +247,204 @@ static void publish_audio(bink object, const int enabled[7],
             mix_pcm, (size_t)samples_out * sizeof(int16_t));
 
         if (grown == NULL)
-            return;
+            return 0;
         mix_pcm = grown;
         mix_cap = samples_out;
     }
     if (bink_mix(tracks, count, (unsigned long)audio->rate, audio->channels,
                  mix_pcm, frames_out) != 0)
-        return;
-    audio_queue(audio, mix_pcm, samples_out * sizeof(int16_t));
+        return 0;
+    return samples_out * sizeof(int16_t);
 }
 
-static void wait_for_audio(const PlayerAudio *audio, double usf)
+static void publish_audio(bink object, const int enabled[7],
+                          const unsigned char track_channels[7],
+                          const unsigned long track_rates[7],
+                          PlayerAudio *audio, unsigned long *total_bytes)
 {
-    double limit = (double)audio->rate * (double)audio->channels * 2.0 *
-                   usf / 1000000.0 * 2.0;
+    unsigned long bytes = mix_current(object, enabled, track_channels,
+                                      track_rates, audio, total_bytes);
 
-    while ((double)audio_queued(audio) > limit)
+    if (bytes > 0)
+        audio_queue(audio, mix_pcm, bytes);
+}
+
+static int append_pcm(unsigned char **stream, unsigned long *length,
+                      unsigned long *cap, unsigned long bytes)
+{
+    unsigned char *grown;
+    unsigned long need;
+
+    if (bytes == 0)
+        return 0;
+    if (*length > (unsigned long)-1 - bytes)
+        return -1;
+    need = *length + bytes;
+    if (need > *cap) {
+        unsigned long next = *cap == 0 ? need : *cap;
+
+        while (next < need) {
+            if (next > (unsigned long)-1 / 2)
+                return -1;
+            next *= 2;
+        }
+        grown = (unsigned char *)realloc(*stream, (size_t)next);
+        if (grown == NULL)
+            return -1;
+        *stream = grown;
+        *cap = next;
+    }
+    memcpy(*stream + *length, mix_pcm, (size_t)bytes);
+    *length += bytes;
+    return 0;
+}
+
+#ifdef BINK_USE_SDL3
+typedef Uint64 PlayerTicks;
+#else
+typedef Uint32 PlayerTicks;
+#endif
+
+/* Handle quit, escape, and space. Put every other event back. */
+static int poll_wait_input(int *quit, int *paused, PlayerAudio *audio,
+                           int *device_paused)
+{
+    SDL_Event keep[128];
+    SDL_Event event;
+    int kept = 0;
+    int stop = 0;
+    int i;
+
+    while (kept < 128 && SDL_PollEvent(&event)) {
+        int handled = 0;
+
+        if (!stop && event.type == BINK_EVENT_QUIT) {
+            *quit = 1;
+            stop = 1;
+            handled = 1;
+        } else if (!stop && event.type == BINK_EVENT_KEY_DOWN) {
+            int key = BINK_EVENT_KEY(event);
+
+            if (key == SDLK_ESCAPE || key == BINK_KEY_Q) {
+                *quit = 1;
+                stop = 1;
+                handled = 1;
+            } else if (key == SDLK_SPACE) {
+                *paused = !*paused;
+                audio_set_paused(audio, *paused, device_paused);
+                handled = 1;
+                if (*paused)
+                    stop = 1;
+            }
+        }
+        if (!handled)
+            keep[kept++] = event;
+    }
+    for (i = 0; i < kept; i++)
+        (void)SDL_PushEvent(&keep[i]);
+    return stop;
+}
+
+/* Wait until one video frame of PCM has left the queue. The rest of a
+   burst stays queued. A queue that does not fall for half a second lets
+   the picture advance so a stalled device cannot wedge the window. */
+static void wait_for_audio(PlayerAudio *audio, double usf, int *quit,
+                           int *paused, int *device_paused)
+{
+    unsigned long frame_bytes = bink_frame_bytes(
+        (unsigned long)audio->rate, audio->channels, usf);
+    unsigned long mark = audio_queued(audio);
+    unsigned long last_queued = mark;
+    PlayerTicks last_change = SDL_GetTicks();
+
+    while (bink_audio_waiting(mark, audio_queued(audio), frame_bytes)) {
+        unsigned long queued;
+        PlayerTicks now;
+
+        if (poll_wait_input(quit, paused, audio, device_paused))
+            return;
+
+        queued = audio_queued(audio);
+        now = SDL_GetTicks();
+        if (queued < last_queued) {
+            last_queued = queued;
+            last_change = now;
+        } else if ((PlayerTicks)(now - last_change) > 500) {
+            return;
+        }
         SDL_Delay(5);
+    }
 }
 
 static int seek_to_frame(bink object, unsigned long target, char *status,
-                         PlayerAudio *audio)
+                         PlayerAudio *audio, double usf,
+                         const int enabled[7],
+                         const unsigned char track_channels[7],
+                         const unsigned long track_rates[7])
 {
     unsigned long cur = 0;
     unsigned long frames = 0;
+    unsigned long origin = 0;
+    unsigned char *stream = NULL;
+    unsigned long length = 0;
+    unsigned long cap = 0;
 
     audio_clear(audio);
     if (bink_seek_keyframe(object, target) != 0)
         return -1;
     if (bink_info_all(object, &cur, &frames, NULL) != 0)
         return -1;
+    origin = cur;
+
+    if (audio->ready) {
+        unsigned long bytes = mix_current(object, enabled, track_channels,
+                                          track_rates, audio, NULL);
+
+        if (append_pcm(&stream, &length, &cap, bytes) != 0) {
+            free(stream);
+            return -1;
+        }
+    }
     while (cur < target) {
         char next = bink_next(object);
 
-        if (next != BINK_MORE && next != BINK_LAST)
+        if (next != BINK_MORE && next != BINK_LAST) {
+            free(stream);
             return -1;
-        if (bink_info_all(object, &cur, &frames, NULL) != 0)
+        }
+        if (bink_info_all(object, &cur, &frames, NULL) != 0) {
+            free(stream);
             return -1;
+        }
         *status = next;
+        if (!audio->ready)
+            continue;
+        {
+            unsigned long bytes = mix_current(object, enabled, track_channels,
+                                              track_rates, audio, NULL);
+
+            if (append_pcm(&stream, &length, &cap, bytes) != 0) {
+                free(stream);
+                return -1;
+            }
+        }
     }
+
+    if (audio->ready && length > 0) {
+        unsigned long offset = bink_soundtrack_offset(
+            (unsigned long)audio->rate, audio->channels, usf, target);
+        unsigned long start = bink_soundtrack_offset(
+            (unsigned long)audio->rate, audio->channels, usf, origin);
+
+        if (offset >= start)
+            offset -= start;
+        else
+            offset = 0;
+        if (offset < length)
+            audio_queue(audio, stream + offset, length - offset);
+    }
+    free(stream);
+
     if (frames > 0 && cur + 1 >= frames)
         *status = BINK_LAST;
     else
@@ -321,9 +500,9 @@ int main(int argc, char **argv)
     unsigned long audio_bytes = 0;
     int audio_inited = 0;
     int need_audio = 1;
-    int landed = 0;
     int quit = 0;
     int paused = 0;
+    int device_paused = 0;
     int redraw = 1;
     int headless = 0;
     int exit_code = 0;
@@ -420,7 +599,8 @@ int main(int argc, char **argv)
             unsigned long cur = 0;
 
             if (end == seek_env ||
-                seek_to_frame(b, target, &status, &audio) != 0) {
+                seek_to_frame(b, target, &status, &audio, usf, enabled,
+                              channels, rates) != 0) {
                 audio_close(&audio);
                 if (audio_inited)
                     SDL_QuitSubSystem(SDL_INIT_AUDIO);
@@ -543,16 +723,13 @@ int main(int argc, char **argv)
                     if (frames > 0 && target >= (long)frames)
                         target = (long)frames - 1;
                     if (seek_to_frame(b, (unsigned long)target, &status,
-                                      &audio) == 0) {
+                                      &audio, usf, enabled, channels,
+                                      rates) == 0) {
                         redraw = 1;
-                        landed = 1;
+                        need_audio = 0;
                     }
                 }
             }
-        }
-        if (landed) {
-            publish_audio(b, enabled, channels, rates, &audio, &audio_bytes);
-            landed = 0;
         }
         if (quit)
             break;
@@ -569,9 +746,12 @@ int main(int argc, char **argv)
         }
 
         if (paused) {
+            audio_set_paused(&audio, 1, &device_paused);
             SDL_Delay(10);
             continue;
         }
+        if (device_paused)
+            audio_set_paused(&audio, 0, &device_paused);
 
         if (test_frames != 0 && decoded >= test_frames)
             break;
@@ -580,9 +760,14 @@ int main(int argc, char **argv)
             break;
 
         if (audio.ready && test_frames == 0)
-            wait_for_audio(&audio, usf);
+            wait_for_audio(&audio, usf, &quit, &paused, &device_paused);
         else if (!headless)
             wait_until((double)SDL_GetTicks() + frame_ms);
+
+        if (quit)
+            break;
+        if (paused)
+            continue;
 
         status = bink_next(b);
         if (status == BINK_ERROR || status == BINK_DONE)

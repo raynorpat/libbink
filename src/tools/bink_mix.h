@@ -26,4 +26,18 @@ int bink_mix(const BinkMixTrack *tracks, int count,
              unsigned long out_rate, int out_channels,
              int16_t *dst, unsigned long dst_frames);
 
+/* Bytes of PCM for one picture at the device rate. */
+unsigned long bink_frame_bytes(unsigned long rate, int channels, double usf);
+
+/* 1 while this picture still owes one frame of played PCM.
+   A queue that has already given up frame_bytes is not a reason to wait.
+   An empty queue does not wait. */
+int bink_audio_waiting(unsigned long queued_at_mark,
+                       unsigned long queued_now,
+                       unsigned long frame_bytes);
+
+/* Mixed-PCM byte offset of picture `frame` on the device timeline. */
+unsigned long bink_soundtrack_offset(unsigned long rate, int channels,
+                                     double usf, unsigned long frame);
+
 #endif
