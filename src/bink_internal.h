@@ -14,6 +14,7 @@ typedef struct {
     unsigned char channels;
     unsigned char bitdepth;
     unsigned short flags;
+    unsigned long max_decoded;
 } BinkAudioTrack;
 
 struct bink_t {

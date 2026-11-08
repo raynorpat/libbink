@@ -143,8 +143,13 @@ static int bink_parse_header(bink b, BinkReader *r)
     tracks = (int)value;
 
     if (tracks > 0) {
-        if (reader_skip(r, 4 * (unsigned long)tracks) != 0)
-            return -1;
+        for (i = 0; i < (unsigned long)tracks; i++) {
+            unsigned long max_decoded;
+
+            if (read_u32(r, &max_decoded) != 0)
+                return -1;
+            b->audio[i].max_decoded = max_decoded;
+        }
         for (i = 0; i < (unsigned long)tracks; i++) {
             unsigned int rate;
             unsigned int flags;
