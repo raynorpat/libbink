@@ -24,7 +24,7 @@ function(bink_set_compile_settings target)
 endfunction()
 
 if(BINK_BUILD_STATIC)
-  add_library(bink_static STATIC src/bink.c)
+  add_library(bink_static STATIC src/bink.c src/bink_bits.c)
   bink_set_compile_settings(bink_static)
   target_include_directories(bink_static PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
@@ -33,7 +33,7 @@ if(BINK_BUILD_STATIC)
 endif()
 
 if(BINK_BUILD_SHARED)
-  add_library(bink_shared SHARED src/bink.c)
+  add_library(bink_shared SHARED src/bink.c src/bink_bits.c)
   bink_set_compile_settings(bink_shared)
   target_include_directories(bink_shared PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
