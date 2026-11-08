@@ -22,6 +22,8 @@ The decoder is derived from:
   (c) 2007-2008 Peter Ross
 - `libavcodec/binkdsp.c`, copyright (c) 2009 Konstantin Shishkov
 - `libavcodec/binkdata.h`, same authors
+- `libavcodec/binkaudio.c`, copyright (c) 2007-2011 Peter Ross and
+  (c) 2009 Daniel Verkamp
 
 Those files are licensed under the GNU Lesser General Public License,
 version 2.1 or later. libbink keeps the same license. See `LICENSE` and
@@ -55,13 +57,15 @@ When the audio track count is non-zero, the header continues with:
 
 | Field | Size | Notes |
 | --- | --- | --- |
-| Maximum decoded size, per track | `4 * tracks` | Skipped |
+| Maximum decoded size, per track | `4 * tracks` | PCM buffer size for that track, in bytes |
 | Sample rate, per track | `2` | Little-endian Hz |
-| Flags, per track | `2` | `0x1000` = Bink Audio DCT, `0x2000` = stereo |
+| Flags, per track | `2` | `0x1000` = DCT, otherwise RDFT; `0x2000` = stereo |
 | Track ID, per track | `4` | Skipped |
 
-Audio payloads are skipped by libbink, but the metadata is reported through
-`bink_info_audio`.
+The maximum-decoded-size words are the track's output buffer. libbink reads
+them and reports the rate, channel count, and 16-bit depth through
+`bink_info_audio`. A payload that would write past that size fails the
+track for the frame.
 
 ## Frame index and packets
 
@@ -97,6 +101,22 @@ Y, U, V planes
 
 For revisions `f`, `g`, and `h` there are no size words; the planes (and
 alpha, when present) follow immediately after the audio chunks.
+
+## Audio
+
+Each enabled track is Bink Audio, ported from FFmpeg's
+`libavcodec/binkaudio.c`. `flags & 0x1000` selects DCT. Otherwise the track
+is RDFT. `flags & 0x2000` selects stereo; otherwise the track is mono.
+Published samples are native-endian signed 16-bit.
+
+The bytes after `chunk_size` still start with 32 bits. Those bits are the
+reported decompressed size and are skipped. The remainder is one or more
+transform blocks. Each block overlaps the next by one-sixteenth of the
+transform window. `bink_first` and `bink_seek_keyframe` clear that overlap
+before the landed frame. An empty chunk (`chunk_size == 0`) adds no samples
+and no silence, and it leaves the overlap in place. A chunk the bit reader
+cannot finish publishes nothing for that track and leaves the picture and
+the other tracks running.
 
 ## Bitstream conventions
 

@@ -7,10 +7,13 @@ open/info/decode/seek API in the spirit of
 
 ## Status
 
-Video decoding is implemented for Bink 1 files with the `BIKf`, `BIKg`,
-`BIKh`, and `BIKi` signatures. Bink Audio, Bink 2 (`KB2*`), and the legacy
-`BIKb` plane decoder are not supported in this version. Audio stream
-metadata is parsed and reported, but no audio samples are decoded.
+Video and audio decoding are implemented for Bink 1 files with the `BIKf`,
+`BIKg`, `BIKh`, and `BIKi` signatures. A track is decoded when it is
+enabled. Both Bink Audio DCT (`flags & 0x1000`) and RDFT are supported.
+The SDL player mixes every enabled track. A payload the decoder cannot
+finish drops that track for the frame; the picture and the other tracks
+continue. Bink 2 (`KB2*`) and the legacy `BIKb` plane decoder are not
+supported in this version.
 
 Decoded frames are available as padded YUV 4:2:0 planes (plus alpha when
 present) and as a lazily converted packed RGB24 buffer. Keyframe seeking
@@ -23,8 +26,9 @@ index.
 version 2.1 or later. See `LICENSE`.
 
 The Bink 1 decoder is a port of FFmpeg's `libavcodec/bink.c`,
-`libavcodec/binkdsp.c`, and `libavcodec/binkdata.h`. Those files are
-copyright the FFmpeg developers and licensed under the LGPL-2.1-or-later.
+`libavcodec/binkdsp.c`, `libavcodec/binkdata.h`, and
+`libavcodec/binkaudio.c`. Those files are copyright the FFmpeg developers
+and licensed under the LGPL-2.1-or-later.
 See `docs/bink.md` for implementation notes and attribution.
 
 ## Build
@@ -70,7 +74,8 @@ Full documentation is in `docs/usage.md`.
 ## Tools
 
 - `bink_sdl_player video.bik` - SDL3 (preferred) or SDL2 playback.
-  Esc/Q quits, Space pauses, Left/Right seek one second.
+  Enables every audio track and mixes them. Esc/Q quits, Space pauses,
+  Left/Right seek one second.
 - `bink_dump [--frames N] video.bik [outdir]` - headless PPM frame dump and
   checksums. Writes `frame_%05u.ppm` (P6) files.
 

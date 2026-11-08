@@ -154,9 +154,7 @@ pointer may be `NULL`.
   means an alpha plane is present; `BINK_FLAG_GRAY` (`0x00020000`) marks
   grayscale content.
 - `track_mask` has bit `i` set when audio track `i` exists. `channels` is
-  1 or 2, `bitdepth` is reported as 16, and `audio_rate[i]` is the stream
-  sample rate. Metadata is parsed even though audio decode is not
-  implemented.
+  1 or 2, `bitdepth` is 16, and `audio_rate[i]` is the stream sample rate.
 
 ### Enabling tracks
 
@@ -170,8 +168,11 @@ char bink_enable_audio(bink object, unsigned char track,
 `bink_enable_video(b, 0)` stops decoding. The first enable may fail with
 `-1` on allocation failure.
 
-`bink_enable_audio` accepts the call and returns `0` but currently does
-nothing.
+`bink_enable_audio(b, track, 1)` creates that track's decoder and returns
+`0`. `bink_enable_audio(b, track, 0)` destroys it. A `NULL` handle or a
+track index past the file's track count returns `-1`. Video and audio
+enables are independent. Enabling a track after playback has started
+starts a fresh decoder, with no overlap carried in from earlier frames.
 
 ### Frame iteration and seeking
 
@@ -194,6 +195,11 @@ nearest frame whose container index entry is flagged as a keyframe, resets
 the decoder, and decodes that keyframe. It returns `0` on success and `-1`
 on failure. Because the decoder has no Bink 1 intra-frame state, playback
 after a seek starts from the keyframe itself; call `bink_next` to advance.
+`bink_first` and `bink_seek_keyframe` also clear every enabled track's
+overlap before the landed frame is decoded. `bink_next` keeps that overlap
+and advances it with the picture. A video decode failure still returns
+`BINK_ERROR` and does not decode or replace the published audio. An audio
+payload the decoder cannot finish does not fail the frame.
 
 All five reference files in the test suite mark only frame 0 as a keyframe,
 so every seek lands on frame 0 for those files.
@@ -238,8 +244,19 @@ The plane pointers and RGB buffer belong to the `bink` handle. They remain
 valid until the next decode, a seek, `bink_enable_video(b, 0)`, or
 `bink_close`. Copy the data if you need it longer.
 
-`bink_get_audio` always returns `NULL` and `bink_get_audio_size` always
-returns `0` in this video-only version.
+`bink_get_audio` returns the current frame's PCM for one enabled track:
+native-endian signed 16-bit. Mono is `S0 S1 ...`. Stereo is `L0 R0 L1 R1 ...`.
+`bink_get_audio_size` is the byte length of that buffer. Read both from the
+same frame. The pointer belongs to the handle until the next
+`bink_first`, `bink_next`, or `bink_seek_keyframe`, until that track is
+disabled, or until `bink_close`.
+
+The pointer is `NULL` and the size is `0` when the handle is `NULL`, the
+track is out of range, the track is disabled, no frame has been decoded,
+or this frame produced no samples. An empty chunk adds no samples and no
+silence, and it does not reset overlap. A payload the decoder cannot
+finish (the bit reader runs out, or a checked limit fails) does the same
+for that track. The other tracks are still decoded.
 
 ## Error handling
 
@@ -259,9 +276,8 @@ handles may be used concurrently.
 
 ## Limitations
 
-- Bink 1 video only. Bink 2 (`KB2*`), `BIKb`, and `BIKk` are rejected.
-- No Bink Audio decoding; only stream metadata is exposed.
-- No Alpha plane in the RGB conversion.
+- Bink 1 only. Bink 2 (`KB2*`), `BIKb`, and `BIKk` are rejected.
+- No alpha plane in the RGB conversion.
 - No post-processing or scaling; the SDL player lets SDL scale the texture.
 - Seeking is keyframe-only. These files use frame 0 as the only keyframe.
 
@@ -280,10 +296,24 @@ bink_sdl_player video.bik
 ```
 
 Keys: Esc or Q quits, Space pauses, Left/Right seeks one second. A seek
-walks back to the nearest keyframe and then decodes forward to the target
-frame. Setting `BINK_SDL_TEST_FRAMES` to a positive integer makes the player
-exit successfully after decoding that many frames, which the CTest suite
-uses with the SDL dummy video driver. If window or renderer creation fails
-while that variable is set, the player falls back to a headless decode loop.
-`BINK_SDL_TEST_SEEK` seeks to that frame number, prints `seeked frame N`,
-and exits.
+walks back to the nearest keyframe, clears the audio queue, and then
+decodes forward to the target frame.
+
+The player enables every track in the file. It opens one device at the
+first enabled track's sample rate, in stereo when any enabled track is
+stereo and in mono otherwise. Each track is resampled with linear
+interpolation and the samples are summed with signed 16-bit saturation.
+While the device is open, the next picture waits until no more than two
+video frames of PCM are queued. If the device cannot be opened, the player
+prints the SDL error and the video continues without sound. A file with no
+audio tracks does not open a device.
+
+Setting `BINK_SDL_TEST_FRAMES` to a positive integer makes the player exit
+successfully after decoding that many frames, which the CTest suite uses
+with the SDL dummy video and audio drivers. The player prints one stdout
+line, `audio bytes N`, where N is the sum of `bink_get_audio_size` over
+those frames and every track. That path does not wait on the audio queue.
+If window or renderer creation fails while that variable is set, the player
+falls back to a headless decode loop. `BINK_SDL_TEST_SEEK` seeks to that
+frame number, prints `seeked frame N`, and exits. It enables audio and does
+not wait on the queue.
