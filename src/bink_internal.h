@@ -41,6 +41,12 @@ struct bink_t {
     unsigned long *frame_sizes;
     unsigned char *frame_keyframes;
 
+    /* current frame packet */
+    unsigned char *frame_data;
+    unsigned long frame_data_size;
+    const unsigned char *video_data;
+    unsigned long video_size;
+
     /* playback state */
     unsigned long current_frame;
     unsigned char video_enabled;

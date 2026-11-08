@@ -64,6 +64,7 @@ static void bink_free(bink b)
     free(b->frame_offsets);
     free(b->frame_sizes);
     free(b->frame_keyframes);
+    free(b->frame_data);
     free(b->mem);
     free(b);
 }
@@ -376,5 +377,118 @@ char bink_info_audio(const bink object, unsigned char *track_mask,
         if (audio_rate)
             audio_rate[i] = object->audio[i].rate;
     }
+    return 0;
+}
+
+static unsigned long get_le32(const unsigned char *p)
+{
+    return (unsigned long)p[0] | ((unsigned long)p[1] << 8) |
+           ((unsigned long)p[2] << 16) | ((unsigned long)p[3] << 24);
+}
+
+static int bink_read_frame_chunk(bink object, unsigned long index)
+{
+    unsigned long offset;
+    unsigned long size;
+    unsigned long pos = 0;
+    int i;
+
+    if (index >= object->frame_count)
+        return -1;
+
+    offset = object->frame_offsets[index];
+    size = object->frame_sizes[index];
+
+    if (size > object->frame_data_size) {
+        unsigned char *data = (unsigned char *)realloc(object->frame_data,
+                                                       (size_t)size);
+
+        if (data == NULL)
+            return -1;
+        object->frame_data = data;
+        object->frame_data_size = size;
+    }
+
+    if (object->mode == BINK_MODE_MEMORY) {
+        memcpy(object->frame_data, object->mem + offset, (size_t)size);
+    } else {
+        if (fseek(object->file, (long)offset, SEEK_SET) != 0)
+            return -1;
+        if (fread(object->frame_data, 1, (size_t)size, object->file) !=
+            (size_t)size)
+            return -1;
+    }
+
+    for (i = 0; i < object->audio_tracks; i++) {
+        unsigned long audio_size;
+
+        if (size - pos < 4)
+            return -1;
+        audio_size = get_le32(object->frame_data + pos);
+        if (audio_size > size - pos - 4)
+            return -1;
+        pos += 4 + audio_size;
+    }
+
+    object->video_data = object->frame_data + pos;
+    object->video_size = size - pos;
+    return 0;
+}
+
+char bink_enable_video(bink object, unsigned char enable)
+{
+    if (object == NULL)
+        return -1;
+    object->video_enabled = enable ? 1 : 0;
+    return 0;
+}
+
+char bink_enable_audio(bink object, unsigned char track, unsigned char enable)
+{
+    (void)track;
+    (void)enable;
+
+    if (object == NULL)
+        return -1;
+    return 0;
+}
+
+char bink_first(bink object)
+{
+    if (object == NULL)
+        return BINK_ERROR;
+    if (bink_read_frame_chunk(object, 0) != 0)
+        return BINK_ERROR;
+    object->current_frame = 0;
+    return (object->frame_count == 1) ? BINK_LAST : BINK_MORE;
+}
+
+char bink_next(bink object)
+{
+    unsigned long next;
+
+    if (object == NULL)
+        return BINK_ERROR;
+    if (object->current_frame + 1 >= object->frame_count)
+        return BINK_DONE;
+
+    next = object->current_frame + 1;
+    if (bink_read_frame_chunk(object, next) != 0)
+        return BINK_ERROR;
+    object->current_frame = next;
+    return (next + 1 == object->frame_count) ? BINK_LAST : BINK_MORE;
+}
+
+char bink_seek_keyframe(bink object, unsigned long frame)
+{
+    if (object == NULL)
+        return -1;
+    if (frame >= object->frame_count)
+        frame = object->frame_count - 1;
+    while (frame > 0 && !object->frame_keyframes[frame])
+        frame--;
+    if (bink_read_frame_chunk(object, frame) != 0)
+        return -1;
+    object->current_frame = frame;
     return 0;
 }
