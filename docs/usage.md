@@ -246,6 +246,8 @@ valid until the next decode, a seek, `bink_enable_video(b, 0)`, or
 
 `bink_get_audio` returns the current frame's PCM for one enabled track:
 native-endian signed 16-bit. Mono is `S0 S1 ...`. Stereo is `L0 R0 L1 R1 ...`.
+Container integers stay little-endian on every host. On a big-endian host
+each sample is stored with the high byte first.
 `bink_get_audio_size` is the byte length of that buffer. Read both from the
 same frame. The pointer belongs to the handle until the next
 `bink_first`, `bink_next`, or `bink_seek_keyframe`, until that track is
@@ -302,8 +304,10 @@ forward. Samples that belonged under earlier pictures are left out.
 
 The player enables every track in the file. It opens one device at the
 first enabled track's sample rate, in stereo when any enabled track is
-stereo and in mono otherwise. Each track is resampled with linear
-interpolation and the samples are summed with signed 16-bit saturation.
+stereo and in mono otherwise. The device format is host-endian signed
+16-bit, the same order as `bink_get_audio`. Each track is resampled with
+linear interpolation and the samples are summed with signed 16-bit
+saturation.
 While the device is open, the next picture waits until one video frame of
 PCM has been played. A burst stays queued and keeps playing under the
 later pictures, including pictures whose chunk is empty. An empty chunk

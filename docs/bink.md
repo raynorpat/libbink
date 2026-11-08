@@ -107,7 +107,9 @@ alpha, when present) follow immediately after the audio chunks.
 Each enabled track is Bink Audio, ported from FFmpeg's
 `libavcodec/binkaudio.c`. `flags & 0x1000` selects DCT. Otherwise the track
 is RDFT. `flags & 0x2000` selects stereo; otherwise the track is mono.
-Published samples are native-endian signed 16-bit.
+Published samples are native-endian signed 16-bit. Container integers stay
+little-endian on every host. On a big-endian host each sample is stored
+with the high byte first.
 
 The bytes after `chunk_size` still start with 32 bits. Those bits are the
 reported decompressed size and are skipped. The remainder is one or more

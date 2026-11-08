@@ -100,7 +100,13 @@ static int audio_open(PlayerAudio *audio, int rate, int channels)
     audio->channels = channels;
     audio->ready = 0;
 #ifdef BINK_USE_SDL3
-    spec.format = SDL_AUDIO_S16;
+    /* Host order. Spell both formats so a later edit does not pin the
+       device to little-endian while the library publishes native s16. */
+#if SDL_BYTEORDER == SDL_LIL_ENDIAN
+    spec.format = SDL_AUDIO_S16LE;
+#else
+    spec.format = SDL_AUDIO_S16BE;
+#endif
     spec.channels = channels;
     spec.freq = rate;
     audio->stream = SDL_OpenAudioDeviceStream(
@@ -109,6 +115,8 @@ static int audio_open(PlayerAudio *audio, int rate, int channels)
         return -1;
 #else
     spec.freq = rate;
+    /* AUDIO_S16SYS is S16LSB on a little-endian host and S16MSB on a
+       big-endian host, matching native s16 from bink_get_audio. */
     spec.format = AUDIO_S16SYS;
     spec.channels = (Uint8)channels;
     spec.samples = 4096;

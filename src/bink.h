@@ -94,9 +94,9 @@ const unsigned char *bink_get_video(const bink object);
 const unsigned char *bink_get_plane(const bink object, int plane);
 /** retrieve the row stride in bytes of a decoded plane */
 int bink_get_stride(const bink object, int plane);
-/** retrieve decoded audio for a track (unimplemented in this version) */
+/** native-endian s16 for this frame (mono S0 S1, stereo L0 R0), or NULL */
 const unsigned char *bink_get_audio(const bink object, unsigned char track);
-/** retrieve the size of decoded audio for a track (0 in this version) */
+/** byte length of that PCM, or 0 when the pointer is NULL */
 unsigned long bink_get_audio_size(const bink object, unsigned char track);
 
 #ifdef __cplusplus

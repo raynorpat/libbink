@@ -10,10 +10,11 @@ open/info/decode/seek API in the spirit of
 Video and audio decoding are implemented for Bink 1 files with the `BIKf`,
 `BIKg`, `BIKh`, and `BIKi` signatures. A track is decoded when it is
 enabled. Both Bink Audio DCT (`flags & 0x1000`) and RDFT are supported.
-The SDL player mixes every enabled track. A payload the decoder cannot
-finish drops that track for the frame; the picture and the other tracks
-continue. Bink 2 (`KB2*`) and the legacy `BIKb` plane decoder are not
-supported in this version.
+The SDL player mixes every enabled track and queues host-endian signed
+16-bit PCM, the same order `bink_get_audio` publishes. A payload the
+decoder cannot finish drops that track for the frame; the picture and the
+other tracks continue. Bink 2 (`KB2*`) and the legacy `BIKb` plane decoder
+are not supported in this version.
 
 Decoded frames are available as padded YUV 4:2:0 planes (plus alpha when
 present) and as a lazily converted packed RGB24 buffer. Keyframe seeking

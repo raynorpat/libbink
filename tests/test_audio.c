@@ -186,7 +186,7 @@ static int walk_dct_file(const char *file, int enable_video)
 
         if (frame == 0 && ref != NULL) {
             CHECK(size == ref->frame0_bytes);
-            CHECK(fnv1a(pcm, (size_t)size) == ref->frame0_hash);
+            CHECK(fnv1a_s16le(pcm, (size_t)size) == ref->frame0_hash);
         }
         if (frame == 0 &&
             strcmp(file, "ATI-9700-Animusic-Movie-v1.0.bik") == 0)
@@ -206,7 +206,7 @@ static int walk_dct_file(const char *file, int enable_video)
     if (ref != NULL) {
         CHECK(saw_empty);
         CHECK(got == ref->pcm_bytes);
-        CHECK(fnv1a(stream, (size_t)got) == ref->hash);
+        CHECK(fnv1a_s16le(stream, (size_t)got) == ref->hash);
     }
     free(stream);
     bink_close(b);
@@ -415,7 +415,7 @@ static int test_second_track_isolated(void)
     pcm = bink_get_audio(b, 0);
     CHECK(size == 134400);
     CHECK(pcm != NULL);
-    CHECK(fnv1a(pcm, (size_t)size) == ref->frame0_hash);
+    CHECK(fnv1a_s16le(pcm, (size_t)size) == ref->frame0_hash);
     CHECK(bink_get_audio_size(b, 1) == 0);
     CHECK(bink_get_audio(b, 1) == NULL);
     bink_close(b);
@@ -523,8 +523,8 @@ static int test_seek_and_modes(void)
 
     CHECK(disk_bytes == ref->pcm_bytes);
     CHECK(mem_bytes == disk_bytes);
-    disk_hash = fnv1a(disk_pcm, (size_t)disk_bytes);
-    mem_hash = fnv1a(mem_pcm, (size_t)mem_bytes);
+    disk_hash = fnv1a_s16le(disk_pcm, (size_t)disk_bytes);
+    mem_hash = fnv1a_s16le(mem_pcm, (size_t)mem_bytes);
     CHECK(disk_hash == ref->hash);
     CHECK(mem_hash == disk_hash);
     free(disk_pcm);
@@ -532,8 +532,21 @@ static int test_seek_and_modes(void)
     return 0;
 }
 
+static int test_pcm_hash_is_little_endian(void)
+{
+    int16_t sample = (int16_t)0x1234;
+    unsigned char le[2];
+
+    le[0] = 0x34;
+    le[1] = 0x12;
+    CHECK(fnv1a_s16le(&sample, sizeof(sample)) == fnv1a(le, 2));
+    return 0;
+}
+
 int main(void)
 {
+    if (test_pcm_hash_is_little_endian() != 0)
+        return 1;
     if (test_synthetic_max_decoded() != 0)
         return 1;
     if (test_enable_without_pcm() != 0)
