@@ -33,3 +33,13 @@ add_test(NAME rgb COMMAND test_rgb)
 add_executable(test_seek test_seek.c)
 target_link_libraries(test_seek PRIVATE ${BINK_LINK_TARGET})
 add_test(NAME seek COMMAND test_seek)
+
+if(BINK_BUILD_TOOLS)
+  add_test(NAME dump COMMAND ${CMAKE_COMMAND}
+    -DDUMP_EXE=$<TARGET_FILE:bink_dump>
+    -DOUT_DIR=${CMAKE_CURRENT_BINARY_DIR}/dump-test
+    -DDUMP_DIR=${CMAKE_CURRENT_BINARY_DIR}/dump-test
+    -DCHECK_SCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/check_dump.cmake
+    -P ${CMAKE_CURRENT_SOURCE_DIR}/run_dump.cmake)
+  set_tests_properties(dump PROPERTIES SKIP_RETURN_CODE 77)
+endif()

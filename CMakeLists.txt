@@ -52,6 +52,12 @@ else()
 endif()
 add_library(Bink::bink ALIAS ${BINK_LINK_TARGET})
 
+if(BINK_BUILD_TOOLS)
+  add_executable(bink_dump src/tools/bink_dump.c)
+  bink_set_compile_settings(bink_dump)
+  target_link_libraries(bink_dump PRIVATE ${BINK_LINK_TARGET})
+endif()
+
 if(BINK_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)

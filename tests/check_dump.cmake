@@ -1,0 +1,8 @@
+if(NOT DEFINED DUMP_DIR)
+  message(FATAL_ERROR "DUMP_DIR is required")
+endif()
+file(GLOB ppms "${DUMP_DIR}/frame_*.ppm")
+list(LENGTH ppms count)
+if(NOT count EQUAL 3)
+  message(FATAL_ERROR "expected 3 PPM files, found ${count}")
+endif()
