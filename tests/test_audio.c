@@ -1,5 +1,6 @@
 #include "bink.h"
 #include "bink_internal.h"
+#include "reference_audio.h"
 #include "test_common.h"
 
 static void w16(unsigned char *p, unsigned int v)
@@ -127,6 +128,104 @@ static int test_real_max_decoded(void)
     return 0;
 }
 
+static const struct reference_audio *find_audio_ref(const char *file)
+{
+    size_t i;
+
+    for (i = 0; i < sizeof(reference_audio) / sizeof(reference_audio[0]); i++) {
+        if (strcmp(reference_audio[i].file, file) == 0)
+            return &reference_audio[i];
+    }
+    return NULL;
+}
+
+static int walk_dct_file(const char *file, int enable_video)
+{
+    const char *dir = test_media_dir();
+    const struct reference_audio *ref = NULL;
+    char path[1024];
+    unsigned char *stream = NULL;
+    unsigned long got = 0;
+    unsigned long frames = 0;
+    unsigned long frame = 0;
+    int saw_empty = 0;
+    char status;
+    bink b;
+
+    if (dir == NULL)
+        return 0;
+
+    ref = find_audio_ref(file);
+    snprintf(path, sizeof(path), "%s/%s", dir, file);
+    b = bink_open_file(path, BINK_MODE_DISK);
+    CHECK(b != NULL);
+    CHECK(bink_info_all(b, NULL, &frames, NULL) == 0);
+    CHECK(bink_enable_audio(b, 0, 1) == 0);
+    if (enable_video)
+        CHECK(bink_enable_video(b, 1) == 0);
+
+    status = bink_first(b);
+    while (status == BINK_MORE || status == BINK_LAST) {
+        unsigned long size = bink_get_audio_size(b, 0);
+        const unsigned char *pcm = bink_get_audio(b, 0);
+
+        if (size == 0) {
+            CHECK(pcm == NULL);
+            if (frame > 0)
+                saw_empty = 1;
+        } else {
+            unsigned char *grown;
+
+            CHECK(pcm != NULL);
+            grown = (unsigned char *)realloc(stream, (size_t)got + (size_t)size);
+            CHECK(grown != NULL);
+            stream = grown;
+            memcpy(stream + got, pcm, (size_t)size);
+            got += size;
+        }
+
+        if (frame == 0 && ref != NULL) {
+            CHECK(size == ref->frame0_bytes);
+            CHECK(fnv1a(pcm, (size_t)size) == ref->frame0_hash);
+        }
+        if (frame == 0 &&
+            strcmp(file, "ATI-9700-Animusic-Movie-v1.0.bik") == 0)
+            CHECK(size == 145920);
+        if (ref != NULL && frame == frames / 2) {
+            CHECK(got > ref->frame0_bytes);
+            CHECK(got < ref->pcm_bytes);
+        }
+
+        if (status == BINK_LAST)
+            break;
+        status = bink_next(b);
+        frame++;
+    }
+    CHECK(status != BINK_ERROR);
+
+    if (ref != NULL) {
+        CHECK(saw_empty);
+        CHECK(got == ref->pcm_bytes);
+        CHECK(fnv1a(stream, (size_t)got) == ref->hash);
+    }
+    free(stream);
+    bink_close(b);
+    return 0;
+}
+
+static int test_dct_matches_reference(void)
+{
+    if (test_media_dir() == NULL)
+        return 0;
+    if (walk_dct_file("logo_lucas.bik", 1) != 0)
+        return 1;
+    if (walk_dct_file("valve.bik", 1) != 0)
+        return 1;
+    if (walk_dct_file("ATI-9700-Animusic-Movie-v1.0.bik", 0) != 0)
+        return 1;
+    return 0;
+}
+
 int main(void)
 {
     if (test_synthetic_max_decoded() != 0)
@@ -134,6 +233,8 @@ int main(void)
     if (test_enable_without_pcm() != 0)
         return 1;
     if (test_real_max_decoded() != 0)
+        return 1;
+    if (test_dct_matches_reference() != 0)
         return 1;
     return 0;
 }
