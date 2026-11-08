@@ -34,6 +34,15 @@ add_executable(test_seek test_seek.c)
 target_link_libraries(test_seek PRIVATE ${BINK_LINK_TARGET})
 add_test(NAME seek COMMAND test_seek)
 
+add_executable(test_malformed test_malformed.c)
+target_link_libraries(test_malformed PRIVATE ${BINK_LINK_TARGET})
+add_test(NAME malformed COMMAND test_malformed)
+
+add_executable(test_modes test_modes.c)
+target_link_libraries(test_modes PRIVATE ${BINK_LINK_TARGET})
+add_test(NAME modes COMMAND test_modes)
+set_tests_properties(modes PROPERTIES SKIP_RETURN_CODE 77)
+
 if(BINK_BUILD_TOOLS)
   add_test(NAME dump COMMAND ${CMAKE_COMMAND}
     -DDUMP_EXE=$<TARGET_FILE:bink_dump>
