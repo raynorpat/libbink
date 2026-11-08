@@ -10,6 +10,11 @@ add_executable(test_audio test_audio.c)
 target_link_libraries(test_audio PRIVATE ${BINK_LINK_TARGET})
 add_test(NAME audio COMMAND test_audio)
 
+add_executable(test_mix test_mix.c ../src/tools/bink_mix.c)
+bink_set_compile_settings(test_mix)
+target_link_libraries(test_mix PRIVATE ${BINK_LINK_TARGET})
+add_test(NAME mix COMMAND test_mix)
+
 add_executable(test_frames test_frames.c)
 target_link_libraries(test_frames PRIVATE ${BINK_LINK_TARGET})
 add_test(NAME frames COMMAND test_frames)
