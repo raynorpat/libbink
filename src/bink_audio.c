@@ -42,7 +42,7 @@ static const unsigned char bink_rle_length_tab[16] = {
     2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15, 16, 32, 64
 };
 
-#define BINK_AUDIO_MAX_FRAME 2048
+#define BINK_AUDIO_MAX_FRAME 4096
 
 struct BinkAudio {
     unsigned long rate;
@@ -170,6 +170,57 @@ static void rdft_idft_c2r(float *data, int n, double *re, double *im)
     }
 }
 
+/*
+ * DFT_C2R, the transform FFmpeg 4.4 runs on a Bink RDFT block.
+ * inverse unmangle with negative_sin, sign convention +1, forward FFT.
+ */
+static void rdft_dft_c2r(float *data, int n, double *re, double *im)
+{
+    int i;
+    int n4 = n >> 2;
+    int fft_n = n >> 1;
+    const float k1 = 0.5f;
+    const float k2 = -0.5f;
+    float ev_re = data[0];
+
+    data[0] = ev_re + data[1];
+    data[1] = ev_re - data[1];
+
+    for (i = 1; i < n4; i++) {
+        int i1 = 2 * i;
+        int i2 = n - i1;
+        float od_im = k2 * (data[i2] - data[i1]);
+        float ev_im = k1 * (data[i1 + 1] - data[i2 + 1]);
+        float od_re = k2 * (data[i1 + 1] + data[i2 + 1]);
+        double angle = 2.0 * M_PI * (double)i / (double)n;
+        float tc = (float)cos(angle);
+        float ts = (float)sin(angle);
+        float sum_re;
+        float sum_im;
+
+        ev_re = k1 * (data[i1] + data[i2]);
+        sum_re = od_re * tc + od_im * ts;
+        sum_im = od_im * tc - od_re * ts;
+        data[i1] = ev_re + sum_re;
+        data[i1 + 1] = ev_im + sum_im;
+        data[i2] = ev_re - sum_re;
+        data[i2 + 1] = sum_im - ev_im;
+    }
+
+    data[0] *= k1;
+    data[1] *= k1;
+
+    for (i = 0; i < fft_n; i++) {
+        re[i] = (double)data[2 * i];
+        im[i] = (double)data[2 * i + 1];
+    }
+    fft_transform(re, im, fft_n, 0);
+    for (i = 0; i < fft_n; i++) {
+        data[2 * i] = (float)re[i];
+        data[2 * i + 1] = (float)im[i];
+    }
+}
+
 /* FFmpeg dct_calc_III. n is the full frame length. src is consumed. */
 static void dct_iii(float *dst, float *src, int n, double *re, double *im)
 {
@@ -274,6 +325,7 @@ int bink_audio_create(BinkAudio **out, unsigned long rate, int channels,
 {
     BinkAudio *audio;
     int bits;
+    int bits_extra = 0;
     int i;
 
     if (out == NULL || channels < 1 || channels > 2)
@@ -281,10 +333,18 @@ int bink_audio_create(BinkAudio **out, unsigned long rate, int channels,
     audio = (BinkAudio *)calloc(1, sizeof(*audio));
     if (audio == NULL)
         return -1;
-    audio->rate = rate;
-    audio->channels = channels;
     audio->use_dct = use_dct;
     audio->max_bytes = max_bytes;
+    if (!use_dct) {
+        /* Bands see rate * channels. The transform itself is one channel. */
+        audio->rate = rate * (unsigned long)channels;
+        if (channels == 2)
+            bits_extra = 1;
+        channels = 1;
+    } else {
+        audio->rate = rate;
+    }
+    audio->channels = channels;
 
     if (rate < 22050)
         bits = 9;
@@ -292,10 +352,14 @@ int bink_audio_create(BinkAudio **out, unsigned long rate, int channels,
         bits = 10;
     else
         bits = 11;
+    bits += bits_extra;
     audio->frame_len = 1 << bits;
     audio->overlap_len = audio->frame_len / 16;
-    audio->root = (float)((double)audio->frame_len /
-                          (sqrt((double)audio->frame_len) * 32768.0));
+    if (use_dct)
+        audio->root = (float)((double)audio->frame_len /
+                              (sqrt((double)audio->frame_len) * 32768.0));
+    else
+        audio->root = (float)(2.0 / (sqrt((double)audio->frame_len) * 32768.0));
     for (i = 0; i < 96; i++)
         audio->quant_table[i] =
             expf((float)i * 0.15289164787221953823f) * audio->root;
@@ -352,7 +416,8 @@ static int decode_dct_block(BinkAudio *audio, BinkBits *bits, int16_t *dst,
     int count = audio->overlap_len * audio->channels;
 
     memset(coeffs, 0, sizeof(coeffs));
-    read_bits(bits, 2, err);
+    if (audio->use_dct)
+        read_bits(bits, 2, err);
     for (ch = 0; ch < audio->channels; ch++) {
         float *out = audio->block + ch * audio->frame_len;
         float *prev = audio->previous + ch * audio->overlap_len;
@@ -408,8 +473,13 @@ static int decode_dct_block(BinkAudio *audio, BinkBits *bits, int16_t *dst,
         }
         if (*err)
             return -1;
-        coeffs[0] *= 2.0f;
-        dct_iii(out, coeffs, audio->frame_len, audio->fft_re, audio->fft_im);
+        if (audio->use_dct) {
+            coeffs[0] *= 2.0f;
+            dct_iii(out, coeffs, audio->frame_len, audio->fft_re, audio->fft_im);
+        } else {
+            memcpy(out, coeffs, (size_t)audio->frame_len * sizeof(float));
+            rdft_dft_c2r(out, audio->frame_len, audio->fft_re, audio->fft_im);
+        }
         if (!audio->first_block) {
             int j = ch;
 
@@ -449,10 +519,6 @@ int bink_audio_decode(BinkAudio *audio, const unsigned char *data,
     if (size == 0) {
         audio->pcm_bytes = 0;
         return 0;
-    }
-    if (!audio->use_dct) {
-        audio->pcm_bytes = 0;
-        return -1;
     }
 
     saved_first = audio->first_block;

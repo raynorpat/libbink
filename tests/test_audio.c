@@ -221,6 +221,8 @@ static int test_dct_matches_reference(void)
         return 1;
     if (walk_dct_file("valve.bik", 1) != 0)
         return 1;
+    if (walk_dct_file("original.bik", 1) != 0)
+        return 1;
     if (walk_dct_file("ATI-9700-Animusic-Movie-v1.0.bik", 0) != 0)
         return 1;
     return 0;

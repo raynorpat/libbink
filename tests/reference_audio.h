@@ -12,13 +12,12 @@ struct reference_audio {
     uint64_t frame0_hash;
 };
 
-/* DCT rows are this decoder's PCM. The length matches FFmpeg and is one
- * published block longer than the VLC capture. Samples stay within 1 of
- * VLC on the shared prefix. original.bik stays the VLC capture until RDFT. */
+/* Lengths match FFmpeg and are one published block longer than the VLC
+ * capture. Samples stay within 1 of VLC on the shared prefix. */
 static const struct reference_audio reference_audio[] = {
     {"logo_lucas.bik", 1562880UL, UINT64_C(7389157777183235125), 134400UL, UINT64_C(13081045652864150667)},
     {"valve.bik", 2058240UL, UINT64_C(14121896791514148014), 138240UL, UINT64_C(5997586078972075720)},
-    {"original.bik", 1973760UL, UINT64_C(1411931194584180899), 138240UL, UINT64_C(1865777885255927181)},
+    {"original.bik", 1981440UL, UINT64_C(10326758693249540139), 138240UL, UINT64_C(15014567824545986972)},
 };
 
 #endif
