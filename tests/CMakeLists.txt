@@ -13,3 +13,7 @@ add_test(NAME frames COMMAND test_frames)
 add_executable(test_bits test_bits.c)
 target_link_libraries(test_bits PRIVATE ${BINK_LINK_TARGET})
 add_test(NAME bits COMMAND test_bits)
+
+add_executable(test_dsp test_dsp.c)
+target_link_libraries(test_dsp PRIVATE ${BINK_LINK_TARGET})
+add_test(NAME dsp COMMAND test_dsp)
