@@ -109,3 +109,24 @@ if(BINK_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)
 endif()
+
+if(BINK_BUILD_STATIC)
+  install(TARGETS bink_static
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+endif()
+
+if(BINK_BUILD_SHARED)
+  install(TARGETS bink_shared
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+endif()
+
+install(FILES src/bink.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+
+if(BINK_BUILD_TOOLS)
+  install(TARGETS bink_dump RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+  if(TARGET bink_sdl_player)
+    install(TARGETS bink_sdl_player RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+  endif()
+endif()

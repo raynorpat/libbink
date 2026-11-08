@@ -9,10 +9,13 @@ open/info/decode/seek API in the spirit of
 
 Video decoding is implemented for Bink 1 files with the `BIKf`, `BIKg`,
 `BIKh`, and `BIKi` signatures. Bink Audio, Bink 2 (`KB2*`), and the legacy
-`BIKb` plane decoder are not supported in this version.
+`BIKb` plane decoder are not supported in this version. Audio stream
+metadata is parsed and reported, but no audio samples are decoded.
 
 Decoded frames are available as padded YUV 4:2:0 planes (plus alpha when
-present) and as a lazily converted packed RGB24 buffer.
+present) and as a lazily converted packed RGB24 buffer. Keyframe seeking
+walks back to the nearest frame flagged as a keyframe in the container
+index.
 
 ## License
 
@@ -31,15 +34,21 @@ cmake -S . -B build -DBINK_BUILD_TOOLS=ON
 cmake --build build
 ```
 
+Requires CMake 3.16 or newer and a C99 compiler. The SDL player is optional
+and built only when an SDL3 or SDL2 CMake package is available.
+
 Options:
 
 - `BINK_BUILD_STATIC` (default `ON`)
 - `BINK_BUILD_SHARED` (default `ON`)
 - `BINK_BUILD_TOOLS` (default `OFF`)
 - `BINK_BUILD_TESTS` (default `ON`)
-- `BINK_SDL_VERSION` (`AUTO`, `2`, or `3`)
+- `BINK_SDL_VERSION` (`AUTO`, `2`, or `3`; default `AUTO`)
 
-See `INSTALL.md` for details.
+`BINK_SDL_VERSION=AUTO` prefers SDL3 and falls back to SDL2. Force a backend
+with `-DBINK_SDL_VERSION=3` or `-DBINK_SDL_VERSION=2`.
+
+See `INSTALL.md` for platform notes and install commands.
 
 ## Usage
 
@@ -60,14 +69,22 @@ Full documentation is in `docs/usage.md`.
 
 ## Tools
 
-- `bink_sdl_player video.bik` - SDL2/SDL3 playback.
-- `bink_dump video.bik [outdir]` - headless PPM frame dump and checksums.
+- `bink_sdl_player video.bik` - SDL3 (preferred) or SDL2 playback.
+  Esc/Q quits, Space pauses, Left/Right seek one second.
+- `bink_dump [--frames N] video.bik [outdir]` - headless PPM frame dump and
+  checksums. Writes `frame_%05u.ppm` (P6) files.
 
 ## Tests
 
-Tests use the sample media named by `BINK_TEST_MEDIA` (defaults are read from
-`$HOME/Downloads` when set by the test harness):
+The test suite includes synthetic unit tests that need no media, plus
+reference and end-to-end tests that read the five sample files from the
+directory named by `BINK_TEST_MEDIA`:
 
 ```sh
 BINK_TEST_MEDIA="$HOME/Downloads" ctest --test-dir build --output-on-failure
 ```
+
+Reference checksums in `tests/reference_checksums.h` were captured from VLC
+3.0.23 decoded YUV4MPEG2 output. `tests/capture_reference.sh` and
+`tests/gen_reference.py` regenerate them. Tests that need sample media skip
+when `BINK_TEST_MEDIA` is unset.
