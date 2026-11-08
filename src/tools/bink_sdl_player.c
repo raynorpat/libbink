@@ -66,6 +66,31 @@ static void wait_until(double target_ms)
         SDL_Delay((Uint32)(target_ms - now + 0.999));
 }
 
+static int seek_to_frame(bink object, unsigned long target, char *status)
+{
+    unsigned long cur = 0;
+    unsigned long frames = 0;
+
+    if (bink_seek_keyframe(object, target) != 0)
+        return -1;
+    if (bink_info_all(object, &cur, &frames, NULL) != 0)
+        return -1;
+    while (cur < target) {
+        char next = bink_next(object);
+
+        if (next != BINK_MORE && next != BINK_LAST)
+            return -1;
+        if (bink_info_all(object, &cur, &frames, NULL) != 0)
+            return -1;
+        *status = next;
+    }
+    if (frames > 0 && cur + 1 >= frames)
+        *status = BINK_LAST;
+    else
+        *status = BINK_MORE;
+    return 0;
+}
+
 static int update_texture(SDL_Texture *texture, bink b)
 {
     const unsigned char *y = bink_get_plane(b, BINK_PLANE_Y);
@@ -170,6 +195,26 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    {
+        const char *seek_env = getenv("BINK_SDL_TEST_SEEK");
+
+        if (seek_env != NULL && seek_env[0] != '\0') {
+            char *end = NULL;
+            unsigned long target = strtoul(seek_env, &end, 10);
+            unsigned long cur = 0;
+
+            if (end == seek_env ||
+                seek_to_frame(b, target, &status) != 0) {
+                bink_close(b);
+                return 1;
+            }
+            bink_info_all(b, &cur, NULL, NULL);
+            printf("seeked frame %lu\n", cur);
+            bink_close(b);
+            return cur == target ? 0 : 1;
+        }
+    }
+
     if (video_init() != 0) {
         if (test_frames == 0) {
             fprintf(stderr, "SDL video init failed: %s\n", SDL_GetError());
@@ -267,11 +312,8 @@ int main(int argc, char **argv)
                         target = 0;
                     if (frames > 0 && target >= (long)frames)
                         target = (long)frames - 1;
-                    if (bink_seek_keyframe(b, (unsigned long)target) == 0) {
-                        bink_info_all(b, &cur, &frames, NULL);
-                        status = (cur + 1 >= frames) ? BINK_LAST : BINK_MORE;
+                    if (seek_to_frame(b, (unsigned long)target, &status) == 0)
                         redraw = 1;
-                    }
                 }
             }
         }

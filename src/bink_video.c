@@ -393,10 +393,13 @@ int bink_video_init(BinkVideo *v, unsigned long width, unsigned long height,
     v->plane_height[BINK_PLANE_V] = (int)((height + 1) >> 1);
     v->plane_height[BINK_PLANE_A] = (int)height;
 
-    v->alloc_height[BINK_PLANE_Y] = v->bh * 8;
-    v->alloc_height[BINK_PLANE_U] = v->cbh * 8;
-    v->alloc_height[BINK_PLANE_V] = v->cbh * 8;
-    v->alloc_height[BINK_PLANE_A] = v->bh * 8;
+    /* Scaled blocks write 16 rows from every even block row. Round the
+     * allocation up to an even block count so the last even row's overhang
+     * stays inside the buffer (1080p luma is 135 block rows). */
+    v->alloc_height[BINK_PLANE_Y] = ((v->bh + 1) & ~1) * 8;
+    v->alloc_height[BINK_PLANE_U] = ((v->cbh + 1) & ~1) * 8;
+    v->alloc_height[BINK_PLANE_V] = ((v->cbh + 1) & ~1) * 8;
+    v->alloc_height[BINK_PLANE_A] = ((v->bh + 1) & ~1) * 8;
 
     for (i = 0; i < 4; i++) {
         size_t bytes;

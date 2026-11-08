@@ -34,6 +34,8 @@ add_executable(test_seek test_seek.c)
 target_link_libraries(test_seek PRIVATE ${BINK_LINK_TARGET})
 add_test(NAME seek COMMAND test_seek)
 
+set_tests_properties(decode rgb seek PROPERTIES SKIP_RETURN_CODE 77)
+
 add_executable(test_malformed test_malformed.c)
 target_link_libraries(test_malformed PRIVATE ${BINK_LINK_TARGET})
 add_test(NAME malformed COMMAND test_malformed)

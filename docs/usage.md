@@ -279,8 +279,11 @@ bink_dump --frames 3 video.bik outdir
 bink_sdl_player video.bik
 ```
 
-Keys: Esc or Q quits, Space pauses, Left/Right seeks one second. Setting
-`BINK_SDL_TEST_FRAMES` to a positive integer makes the player exit
-successfully after decoding that many frames, which the CTest suite uses
-with the SDL dummy video driver. If window or renderer creation fails while
-that variable is set, the player falls back to a headless decode loop.
+Keys: Esc or Q quits, Space pauses, Left/Right seeks one second. A seek
+walks back to the nearest keyframe and then decodes forward to the target
+frame. Setting `BINK_SDL_TEST_FRAMES` to a positive integer makes the player
+exit successfully after decoding that many frames, which the CTest suite
+uses with the SDL dummy video driver. If window or renderer creation fails
+while that variable is set, the player falls back to a headless decode loop.
+`BINK_SDL_TEST_SEEK` seeks to that frame number, prints `seeked frame N`,
+and exits.

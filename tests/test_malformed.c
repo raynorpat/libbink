@@ -1,4 +1,5 @@
 #include "bink.h"
+#include "bink_video.h"
 #include "test_common.h"
 
 static void w32(unsigned char *p, unsigned long v)
@@ -142,9 +143,37 @@ static int test_truncated_media(void)
     return 0;
 }
 
+static int test_plane_padding(void)
+{
+    static const unsigned long sizes[][2] = {
+        { 1920, 1080 },
+        { 1440, 1080 },
+        { 16, 8 }
+    };
+    size_t i;
+
+    for (i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
+        BinkVideo video;
+        int y_blocks;
+        int c_blocks;
+
+        CHECK(bink_video_init(&video, sizes[i][0], sizes[i][1], 0, 'i') == 0);
+        y_blocks = (video.bh + 1) & ~1;
+        c_blocks = (video.cbh + 1) & ~1;
+        CHECK(video.alloc_height[BINK_PLANE_Y] >= y_blocks * 8);
+        CHECK(video.alloc_height[BINK_PLANE_U] >= c_blocks * 8);
+        CHECK(video.alloc_height[BINK_PLANE_V] >= c_blocks * 8);
+        CHECK(video.alloc_height[BINK_PLANE_A] >= y_blocks * 8);
+        bink_video_uninit(&video);
+    }
+    return 0;
+}
+
 int main(void)
 {
     if (test_synthetic() != 0)
+        return 1;
+    if (test_plane_padding() != 0)
         return 1;
     if (test_truncated_media() != 0)
         return 1;
