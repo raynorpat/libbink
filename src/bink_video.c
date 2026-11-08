@@ -501,8 +501,54 @@ int bink_video_plane_height(const BinkVideo *v, int plane)
 
 const unsigned char *bink_video_rgb(BinkVideo *v)
 {
-    (void)v;
-    return NULL;
+    int x;
+    int y;
+    size_t need;
+
+    if (v == NULL || !v->has_prev)
+        return NULL;
+
+    need = (size_t)v->width * (size_t)v->height * 3;
+    if (v->rgb == NULL || v->rgb_size < need) {
+        unsigned char *rgb = (unsigned char *)realloc(v->rgb, need);
+
+        if (rgb == NULL)
+            return NULL;
+        v->rgb = rgb;
+        v->rgb_size = need;
+        v->rgb_valid = 0;
+    }
+
+    if (!v->rgb_valid) {
+        const unsigned char *yp = v->cur[BINK_PLANE_Y];
+        const unsigned char *up = v->cur[BINK_PLANE_U];
+        const unsigned char *vp = v->cur[BINK_PLANE_V];
+        int ys = v->stride[BINK_PLANE_Y];
+        int us = v->stride[BINK_PLANE_U];
+        int vs = v->stride[BINK_PLANE_V];
+
+        for (y = 0; y < (int)v->height; y++) {
+            for (x = 0; x < (int)v->width; x++) {
+                int c = (int)yp[(size_t)y * (size_t)ys + (size_t)x] - 16;
+                int d = (int)up[(size_t)(y >> 1) * (size_t)us +
+                               (size_t)(x >> 1)] - 128;
+                int e = (int)vp[(size_t)(y >> 1) * (size_t)vs +
+                               (size_t)(x >> 1)] - 128;
+                unsigned char *out = v->rgb +
+                    (((size_t)y * (size_t)v->width) + (size_t)x) * 3;
+                int r = (298 * c + 409 * e + 128) >> 8;
+                int g = (298 * c - 100 * d - 208 * e + 128) >> 8;
+                int b = (298 * c + 516 * d + 128) >> 8;
+
+                out[0] = (unsigned char)(r < 0 ? 0 : (r > 255 ? 255 : r));
+                out[1] = (unsigned char)(g < 0 ? 0 : (g > 255 ? 255 : g));
+                out[2] = (unsigned char)(b < 0 ? 0 : (b > 255 ? 255 : b));
+            }
+        }
+        v->rgb_valid = 1;
+    }
+
+    return v->rgb;
 }
 
 /* ------------------------------------------------------------------ */

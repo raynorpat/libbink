@@ -25,3 +25,11 @@ add_test(NAME bundles COMMAND test_bundles)
 add_executable(test_decode test_decode.c)
 target_link_libraries(test_decode PRIVATE ${BINK_LINK_TARGET})
 add_test(NAME decode COMMAND test_decode)
+
+add_executable(test_rgb test_rgb.c)
+target_link_libraries(test_rgb PRIVATE ${BINK_LINK_TARGET})
+add_test(NAME rgb COMMAND test_rgb)
+
+add_executable(test_seek test_seek.c)
+target_link_libraries(test_seek PRIVATE ${BINK_LINK_TARGET})
+add_test(NAME seek COMMAND test_seek)

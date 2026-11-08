@@ -532,3 +532,44 @@ char bink_seek_keyframe(bink object, unsigned long frame)
         return -1;
     return 0;
 }
+
+const unsigned char *bink_get_video(const bink object)
+{
+    if (object == NULL || !object->video_enabled || object->video == NULL)
+        return NULL;
+    return bink_video_rgb(object->video);
+}
+
+const unsigned char *bink_get_plane(const bink object, int plane)
+{
+    if (object == NULL || !object->video_enabled || object->video == NULL)
+        return NULL;
+    if (plane == BINK_PLANE_A && !object->video->has_alpha)
+        return NULL;
+    return bink_video_plane(object->video, plane);
+}
+
+int bink_get_stride(const bink object, int plane)
+{
+    if (object == NULL || !object->video_enabled || object->video == NULL)
+        return 0;
+    if (!object->video->has_prev)
+        return 0;
+    if (plane == BINK_PLANE_A && !object->video->has_alpha)
+        return 0;
+    return bink_video_stride(object->video, plane);
+}
+
+const unsigned char *bink_get_audio(const bink object, unsigned char track)
+{
+    (void)object;
+    (void)track;
+    return NULL;
+}
+
+unsigned long bink_get_audio_size(const bink object, unsigned char track)
+{
+    (void)object;
+    (void)track;
+    return 0;
+}
