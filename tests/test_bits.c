@@ -138,11 +138,15 @@ static int test_tree_decode(void)
     size_t i;
 
     for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        int s;
+
         bw_reset(&bw);
         bw_put(&bw, cases[i].code, cases[i].len);
         bw_init_bits(&bits, &bw);
         memset(&tree, 0, sizeof(tree));
         tree.vlc_num = cases[i].vlc;
+        for (s = 0; s < 16; s++)
+            tree.syms[s] = (unsigned char)s;
         CHECK(bink_tree_decode(&bits, &tree) == cases[i].symbol);
         CHECK(bink_bits_left(&bits) == (int)(bits.size * 8) - cases[i].len);
     }

@@ -219,5 +219,5 @@ int bink_tree_decode(BinkBits *bits, const BinkTree *tree)
     if (len > left)
         return -1;
     bits->bitpos += (size_t)len;
-    return huff_syms[tree->vlc_num][peek];
+    return tree->syms[huff_syms[tree->vlc_num][peek]];
 }

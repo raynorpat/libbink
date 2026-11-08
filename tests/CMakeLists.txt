@@ -17,3 +17,7 @@ add_test(NAME bits COMMAND test_bits)
 add_executable(test_dsp test_dsp.c)
 target_link_libraries(test_dsp PRIVATE ${BINK_LINK_TARGET})
 add_test(NAME dsp COMMAND test_dsp)
+
+add_executable(test_bundles test_bundles.c)
+target_link_libraries(test_bundles PRIVATE ${BINK_LINK_TARGET})
+add_test(NAME bundles COMMAND test_bundles)
