@@ -56,6 +56,53 @@ if(BINK_BUILD_TOOLS)
   add_executable(bink_dump src/tools/bink_dump.c)
   bink_set_compile_settings(bink_dump)
   target_link_libraries(bink_dump PRIVATE ${BINK_LINK_TARGET})
+
+  # The SDL player is optional: prefer SDL3, fall back to SDL2, and skip the
+  # example rather than breaking the rest of the tool build.
+  if(NOT BINK_SDL_VERSION MATCHES "^(AUTO|2|3)$")
+    message(FATAL_ERROR
+      "BINK_SDL_VERSION must be AUTO, 2 or 3 (got '${BINK_SDL_VERSION}')")
+  endif()
+
+  set(BINK_SDL_TARGET "")
+  set(BINK_USE_SDL3 OFF)
+
+  if(BINK_SDL_VERSION STREQUAL "AUTO" OR BINK_SDL_VERSION STREQUAL "3")
+    find_package(SDL3 QUIET CONFIG)
+    if(SDL3_FOUND)
+      set(BINK_SDL_TARGET SDL3::SDL3)
+      set(BINK_USE_SDL3 ON)
+    elseif(BINK_SDL_VERSION STREQUAL "3")
+      message(FATAL_ERROR
+        "BINK_SDL_VERSION=3 but no SDL3 CMake package was found.")
+    endif()
+  endif()
+
+  if(BINK_SDL_TARGET STREQUAL "" AND
+      (BINK_SDL_VERSION STREQUAL "AUTO" OR BINK_SDL_VERSION STREQUAL "2"))
+    find_package(SDL2 QUIET CONFIG)
+    if(SDL2_FOUND)
+      set(BINK_SDL_TARGET SDL2::SDL2)
+    elseif(BINK_SDL_VERSION STREQUAL "2")
+      message(FATAL_ERROR
+        "BINK_SDL_VERSION=2 but no SDL2 CMake package was found.")
+    endif()
+  endif()
+
+  if(BINK_SDL_TARGET STREQUAL "")
+    message(WARNING "SDL2/SDL3 not found; skipping bink_sdl_player.")
+  else()
+    add_executable(bink_sdl_player src/tools/bink_sdl_player.c)
+    bink_set_compile_settings(bink_sdl_player)
+    if(BINK_USE_SDL3)
+      target_compile_definitions(bink_sdl_player PRIVATE BINK_USE_SDL3=1)
+    elseif(TARGET SDL2::SDL2main)
+      target_link_libraries(bink_sdl_player PRIVATE SDL2::SDL2main)
+    endif()
+    target_link_libraries(bink_sdl_player PRIVATE
+      ${BINK_LINK_TARGET} ${BINK_SDL_TARGET})
+    message(STATUS "bink_sdl_player: linking ${BINK_LINK_TARGET} and ${BINK_SDL_TARGET}")
+  endif()
 endif()
 
 if(BINK_BUILD_TESTS)
