@@ -6,6 +6,19 @@
 #include <stddef.h>
 
 enum {
+    SKIP_BLOCK = 0,
+    SCALED_BLOCK,
+    MOTION_BLOCK,
+    RUN_BLOCK,
+    RESIDUE_BLOCK,
+    INTRA_BLOCK,
+    FILL_BLOCK,
+    INTER_BLOCK,
+    PATTERN_BLOCK,
+    RAW_BLOCK
+};
+
+enum {
     BINK_SRC_BLOCK_TYPES = 0,
     BINK_SRC_SUB_BLOCK_TYPES,
     BINK_SRC_COLORS,
@@ -78,5 +91,16 @@ int bink_bundle_read_colors(BinkBits *bits, BinkBundle *b,
                             int version);
 int bink_bundle_read_dcs(BinkBits *bits, BinkBundle *b,
                          int start_bits, int has_sign);
+
+/** Bundle count widths for one plane. width is the plane width in pixels. */
+void bink_bundle_init_lengths(int lens[BINK_NB_SRC], int width, int bw);
+
+/**
+ * Plane geometry shared by the decoder and the encoder.
+ * chroma is 0 for luma and alpha, 1 for U and V.
+ */
+void bink_plane_layout(unsigned long width, unsigned long height, int chroma,
+                       int *plane_w, int *plane_h, int *blocks_x, int *blocks_y,
+                       int *stride, int *alloc_h);
 
 #endif

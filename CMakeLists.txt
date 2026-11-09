@@ -5,8 +5,15 @@ include(GNUInstallDirs)
 
 option(BINK_BUILD_STATIC "Build the static libbink library" ON)
 option(BINK_BUILD_SHARED "Build the shared libbink library" ON)
+option(BINK_BUILD_ENCODER "Build the libbink encoder library" ON)
 option(BINK_BUILD_TOOLS "Build the example programs" OFF)
 option(BINK_BUILD_TESTS "Build the test programs" ON)
+if(BINK_BUILD_TOOLS AND NOT BINK_BUILD_ENCODER)
+  message(STATUS
+    "BINK_BUILD_TOOLS requires the encoder; enabling BINK_BUILD_ENCODER")
+  set(BINK_BUILD_ENCODER ON CACHE BOOL
+    "Build the libbink encoder library" FORCE)
+endif()
 set(BINK_SDL_VERSION "AUTO" CACHE STRING
   "SDL version for bink_sdl_player: AUTO, 2 or 3")
 set_property(CACHE BINK_SDL_VERSION PROPERTY STRINGS AUTO 2 3)
@@ -60,10 +67,38 @@ else()
 endif()
 add_library(Bink::bink ALIAS ${BINK_LINK_TARGET})
 
+if(BINK_BUILD_ENCODER)
+  if(NOT TARGET ${BINK_LINK_TARGET})
+    message(FATAL_ERROR
+      "BINK_BUILD_ENCODER requires BINK_BUILD_STATIC or BINK_BUILD_SHARED")
+  endif()
+  add_library(bink_encoder STATIC
+    src/encoder/bink_encoder.c
+    src/encoder/bink_enc_video.c
+    src/encoder/bink_enc_audio.c
+    src/encoder/bink_enc_image.c
+    src/encoder/bink_enc_wav.c
+    src/encoder/bink_enc_verify.c
+    src/encoder/bink_enc_stb.c)
+  bink_set_compile_settings(bink_encoder)
+  target_include_directories(bink_encoder PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/encoder>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+  target_include_directories(bink_encoder PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb)
+  target_link_libraries(bink_encoder PUBLIC ${BINK_LINK_TARGET})
+  set_target_properties(bink_encoder PROPERTIES OUTPUT_NAME binkenc)
+  add_library(Bink::encoder ALIAS bink_encoder)
+endif()
+
 if(BINK_BUILD_TOOLS)
   add_executable(bink_dump src/tools/bink_dump.c)
   bink_set_compile_settings(bink_dump)
   target_link_libraries(bink_dump PRIVATE ${BINK_LINK_TARGET})
+
+  add_executable(bink_build src/tools/bink_build.c)
+  bink_set_compile_settings(bink_build)
+  target_link_libraries(bink_build PRIVATE bink_encoder)
 
   # The SDL player is optional: prefer SDL3, fall back to SDL2, and skip the
   # example rather than breaking the rest of the tool build.
@@ -133,8 +168,14 @@ endif()
 
 install(FILES src/bink.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 
+if(BINK_BUILD_ENCODER)
+  install(TARGETS bink_encoder ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+  install(FILES src/encoder/bink_encoder.h
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+endif()
+
 if(BINK_BUILD_TOOLS)
-  install(TARGETS bink_dump RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+  install(TARGETS bink_dump bink_build RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
   if(TARGET bink_sdl_player)
     install(TARGETS bink_sdl_player RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
   endif()

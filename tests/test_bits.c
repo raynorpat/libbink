@@ -158,6 +158,68 @@ static int test_tree_decode(void)
     return 0;
 }
 
+static int test_bitwriter(void)
+{
+    BinkBitWriter bw;
+    BinkBits bits;
+    BinkTree tree;
+    int i;
+
+    bink_bw_init(&bw);
+    CHECK(bink_bw_put(&bw, 0x0A, 4) == 0);
+    CHECK(bink_bw_put(&bw, 0x15, 5) == 0);
+    CHECK(bink_bw_put(&bw, 1, 1) == 0);
+    CHECK(bink_bw_put(&bw, 0xABCD, 16) == 0);
+    CHECK(bink_bw_data(&bw) != NULL);
+    bink_bits_init(&bits, bink_bw_data(&bw), bink_bw_bytes(&bw));
+    CHECK(bink_bits_read(&bits, 4) == 0x0A);
+    CHECK(bink_bits_read(&bits, 5) == 0x15);
+    CHECK(bink_bits_read1(&bits) == 1);
+    CHECK(bink_bits_read(&bits, 16) == 0xABCD);
+    bink_bw_free(&bw);
+
+    /* The audio size word is 32 bits. The reader skips that field. */
+    bink_bw_init(&bw);
+    CHECK(bink_bw_put(&bw, 0x01020304u, 32) == 0);
+    CHECK(bink_bw_bytes(&bw) == 4);
+    CHECK(bink_bw_data(&bw)[0] == 0x04);
+    CHECK(bink_bw_data(&bw)[1] == 0x03);
+    CHECK(bink_bw_data(&bw)[2] == 0x02);
+    CHECK(bink_bw_data(&bw)[3] == 0x01);
+    bink_bits_init(&bits, bink_bw_data(&bw), bink_bw_bytes(&bw));
+    bink_bits_skip(&bits, 32);
+    CHECK(bink_bits_left(&bits) == 0);
+    bink_bw_free(&bw);
+
+    bink_bw_init(&bw);
+    CHECK(bink_bw_put(&bw, 1, 1) == 0);
+    CHECK(bink_bw_align32(&bw) == 0);
+    CHECK(bink_bw_bitpos(&bw) == 32);
+    CHECK(bink_bw_bytes(&bw) == 4);
+    bink_bw_free(&bw);
+
+    bink_bw_init(&bw);
+    CHECK(bink_tree_write_identity(&bw, 0) == 0);
+    CHECK(bink_huff_put(&bw, 0, 0) == 0);
+    CHECK(bink_tree_write_identity(&bw, 5) == 0);
+    CHECK(bink_huff_put(&bw, 5, 3) == 0);
+    bink_bits_init(&bits, bink_bw_data(&bw), bink_bw_bytes(&bw));
+    memset(&tree, 0, sizeof(tree));
+    CHECK(bink_tree_read(&bits, &tree) == 0);
+    CHECK(tree.vlc_num == 0);
+    for (i = 0; i < 16; i++)
+        CHECK(tree.syms[i] == i);
+    CHECK(bink_tree_decode(&bits, &tree) == 0);
+    memset(&tree, 0, sizeof(tree));
+    CHECK(bink_tree_read(&bits, &tree) == 0);
+    CHECK(tree.vlc_num == 5);
+    for (i = 0; i < 16; i++)
+        CHECK(tree.syms[i] == i);
+    CHECK(bink_tree_decode(&bits, &tree) == 3);
+    bink_bw_free(&bw);
+    return 0;
+}
+
 int main(void)
 {
     if (test_bitreader() != 0)
@@ -165,6 +227,8 @@ int main(void)
     if (test_tree_read() != 0)
         return 1;
     if (test_tree_decode() != 0)
+        return 1;
+    if (test_bitwriter() != 0)
         return 1;
     return 0;
 }

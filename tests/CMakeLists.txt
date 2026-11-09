@@ -54,6 +54,21 @@ target_link_libraries(test_modes PRIVATE ${BINK_LINK_TARGET})
 add_test(NAME modes COMMAND test_modes)
 set_tests_properties(modes PROPERTIES SKIP_RETURN_CODE 77)
 
+if(TARGET bink_encoder)
+  set(BINK_ENC_PATHS "#define BINK_ENC_TMP \"${CMAKE_CURRENT_BINARY_DIR}\"\n")
+  if(TARGET bink_build)
+    string(APPEND BINK_ENC_PATHS
+      "#define BINK_BUILD_EXE \"$<TARGET_FILE:bink_build>\"\n")
+  endif()
+  file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/bink_enc_paths.h"
+    CONTENT "${BINK_ENC_PATHS}")
+  add_executable(test_encoder test_encoder.c)
+  bink_set_compile_settings(test_encoder)
+  target_include_directories(test_encoder PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+  target_link_libraries(test_encoder PRIVATE bink_encoder)
+  add_test(NAME encoder COMMAND test_encoder)
+endif()
+
 if(BINK_BUILD_TOOLS)
   add_test(NAME dump COMMAND ${CMAKE_COMMAND}
     -DDUMP_EXE=$<TARGET_FILE:bink_dump>
@@ -62,6 +77,8 @@ if(BINK_BUILD_TOOLS)
     -DCHECK_SCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/check_dump.cmake
     -P ${CMAKE_CURRENT_SOURCE_DIR}/run_dump.cmake)
   set_tests_properties(dump PROPERTIES SKIP_RETURN_CODE 77)
+
+  add_test(NAME bink_build_help COMMAND bink_build --help)
 endif()
 
 if(TARGET bink_sdl_player)

@@ -15,7 +15,8 @@ library.
 | --- | --- | --- |
 | `BINK_BUILD_STATIC` | `ON` | Build `bink_static` |
 | `BINK_BUILD_SHARED` | `ON` | Build `bink_shared` (versioned SONAME on Unix) |
-| `BINK_BUILD_TOOLS` | `OFF` | Build `bink_dump` and `bink_sdl_player` |
+| `BINK_BUILD_ENCODER` | `ON` | Build the static encoder `bink_encoder` (`libbinkenc`) |
+| `BINK_BUILD_TOOLS` | `OFF` | Build `bink_dump`, `bink_build`, and `bink_sdl_player`. Turns the encoder on. |
 | `BINK_BUILD_TESTS` | `ON` | Build and register the CTest suite |
 | `BINK_SDL_VERSION` | `AUTO` | `AUTO`, `2`, or `3` |
 
@@ -39,7 +40,9 @@ cmake --build build
 ```
 
 With `AUTO`, CMake looks for SDL3 first and then SDL2. If neither is found,
-`bink_sdl_player` is skipped with a warning and `bink_dump` is still built.
+`bink_sdl_player` is skipped with a warning. `bink_dump` and `bink_build` are
+still built. `bink_build` encodes PPM, BMP, PNG, or JPEG frames into a
+`BIKi` file; see `docs/encoder.md`.
 Force a backend explicitly:
 
 ```sh
@@ -65,8 +68,9 @@ cmake --build build
 cmake --install build
 ```
 
-This installs the libraries, the public header `bink.h`, and the tools that
-were built.
+This installs the libraries, the public headers `bink.h` and (when the
+encoder is built) `bink_encoder.h`, and the tools that were built. The
+encoder archive is `libbinkenc.a`. The CMake alias is `Bink::encoder`.
 
 ## Tests and sample media
 

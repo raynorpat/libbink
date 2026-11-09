@@ -16,6 +16,11 @@ decoder cannot finish drops that track for the frame; the picture and the
 other tracks continue. Bink 2 (`KB2*`) and the legacy `BIKb` plane decoder
 are not supported in this version.
 
+The encoder library writes `BIKi` from packed RGB and optional PCM. Video
+matches the YUV planes the encoder produced. Audio is Bink DCT: silence
+stays silent, and a steady tone decodes near that level. See
+`docs/encoder.md`.
+
 Decoded frames are available as padded YUV 4:2:0 planes (plus alpha when
 present) and as a lazily converted packed RGB24 buffer. Keyframe seeking
 walks back to the nearest frame flagged as a keyframe in the container
@@ -46,7 +51,9 @@ Options:
 
 - `BINK_BUILD_STATIC` (default `ON`)
 - `BINK_BUILD_SHARED` (default `ON`)
-- `BINK_BUILD_TOOLS` (default `OFF`)
+- `BINK_BUILD_ENCODER` (default `ON`) — static `bink_encoder` (`libbinkenc`)
+- `BINK_BUILD_TOOLS` (default `OFF`) — also turns the encoder on, and builds
+  `bink_build`
 - `BINK_BUILD_TESTS` (default `ON`)
 - `BINK_SDL_VERSION` (`AUTO`, `2`, or `3`; default `AUTO`)
 
@@ -79,6 +86,8 @@ Full documentation is in `docs/usage.md`.
   picture and the sound, Left/Right seek one second.
 - `bink_dump [--frames N] video.bik [outdir]` - headless PPM frame dump and
   checksums. Writes `frame_%05u.ppm` (P6) files.
+- `bink_build <images> [-o out.bik]` - encode a directory of PPM, BMP, PNG, or JPEG frames,
+  or one image, into a `BIKi` file. Optional WAV audio. See `docs/encoder.md`.
 
 ## Tests
 

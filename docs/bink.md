@@ -5,7 +5,8 @@ implemented by libbink. It is a porting reference, not a formal
 specification. RAD Game Tools never published a complete specification; the
 description below follows FFmpeg's `libavformat/bink.c` and
 `libavcodec/bink.c`, which are the authoritative behavior for the four
-revisions supported here (`BIKf`, `BIKg`, `BIKh`, `BIKi`).
+revisions supported here (`BIKf`, `BIKg`, `BIKh`, `BIKi`). The encoder
+writes a subset of `BIKi`; see `docs/encoder.md`.
 
 The MultimediaWiki Bink article was also used as background prose:
 <https://wiki.multimedia.cx/index.php/Bink_Container> and

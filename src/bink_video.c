@@ -329,19 +329,6 @@ int bink_bundle_read_dcs(BinkBits *bits, BinkBundle *b,
 #define DC_START_BITS 11
 #define BINK_VALUE_ERROR INT_MIN
 
-enum {
-    SKIP_BLOCK = 0,
-    SCALED_BLOCK,
-    MOTION_BLOCK,
-    RUN_BLOCK,
-    RESIDUE_BLOCK,
-    INTRA_BLOCK,
-    FILL_BLOCK,
-    INTER_BLOCK,
-    PATTERN_BLOCK,
-    RAW_BLOCK
-};
-
 static int align32(unsigned long value)
 {
     return (int)((value + 31) & ~31UL);
@@ -356,6 +343,44 @@ static int int_log2(unsigned int value)
         result++;
     }
     return result;
+}
+
+void bink_bundle_init_lengths(int lens[BINK_NB_SRC], int width, int bw)
+{
+    int w = (width + 7) & ~7;
+
+    lens[BINK_SRC_BLOCK_TYPES] = int_log2((unsigned)((w >> 3) + 511)) + 1;
+    lens[BINK_SRC_SUB_BLOCK_TYPES] = int_log2((unsigned)((w >> 4) + 511)) + 1;
+    lens[BINK_SRC_COLORS] = int_log2((unsigned)(bw * 64 + 511)) + 1;
+    lens[BINK_SRC_INTRA_DC] =
+    lens[BINK_SRC_INTER_DC] =
+    lens[BINK_SRC_X_OFF] =
+    lens[BINK_SRC_Y_OFF] = int_log2((unsigned)((w >> 3) + 511)) + 1;
+    lens[BINK_SRC_PATTERN] = int_log2((unsigned)((bw << 3) + 511)) + 1;
+    lens[BINK_SRC_RUN] = int_log2((unsigned)(bw * 48 + 511)) + 1;
+}
+
+void bink_plane_layout(unsigned long width, unsigned long height, int chroma,
+                       int *plane_w, int *plane_h, int *blocks_x, int *blocks_y,
+                       int *stride, int *alloc_h)
+{
+    int pw = chroma ? (int)((width + 1) >> 1) : (int)width;
+    int ph = chroma ? (int)((height + 1) >> 1) : (int)height;
+    int bx = chroma ? (int)((width + 15) >> 4) : (int)((width + 7) >> 3);
+    int by = chroma ? (int)((height + 15) >> 4) : (int)((height + 7) >> 3);
+
+    if (plane_w != NULL)
+        *plane_w = pw;
+    if (plane_h != NULL)
+        *plane_h = ph;
+    if (blocks_x != NULL)
+        *blocks_x = bx;
+    if (blocks_y != NULL)
+        *blocks_y = by;
+    if (stride != NULL)
+        *stride = align32((unsigned long)pw);
+    if (alloc_h != NULL)
+        *alloc_h = ((by + 1) & ~1) * 8;
 }
 
 int bink_video_init(BinkVideo *v, unsigned long width, unsigned long height,
@@ -373,33 +398,20 @@ int bink_video_init(BinkVideo *v, unsigned long width, unsigned long height,
     v->has_alpha = (flags & BINK_FLAG_ALPHA) ? 1 : 0;
     v->swap_planes = (version >= 'h');
 
-    v->bw = (int)((width + 7) >> 3);
-    v->bh = (int)((height + 7) >> 3);
-    v->cbw = (int)((width + 15) >> 4);
-    v->cbh = (int)((height + 15) >> 4);
-
-    v->stride[BINK_PLANE_Y] = align32(width);
-    v->stride[BINK_PLANE_U] = align32((width + 1) >> 1);
-    v->stride[BINK_PLANE_V] = align32((width + 1) >> 1);
-    v->stride[BINK_PLANE_A] = align32(width);
-
-    v->plane_width[BINK_PLANE_Y] = (int)width;
-    v->plane_width[BINK_PLANE_U] = (int)((width + 1) >> 1);
-    v->plane_width[BINK_PLANE_V] = (int)((width + 1) >> 1);
-    v->plane_width[BINK_PLANE_A] = (int)width;
-
-    v->plane_height[BINK_PLANE_Y] = (int)height;
-    v->plane_height[BINK_PLANE_U] = (int)((height + 1) >> 1);
-    v->plane_height[BINK_PLANE_V] = (int)((height + 1) >> 1);
-    v->plane_height[BINK_PLANE_A] = (int)height;
-
-    /* Scaled blocks write 16 rows from every even block row. Round the
-     * allocation up to an even block count so the last even row's overhang
-     * stays inside the buffer (1080p luma is 135 block rows). */
-    v->alloc_height[BINK_PLANE_Y] = ((v->bh + 1) & ~1) * 8;
-    v->alloc_height[BINK_PLANE_U] = ((v->cbh + 1) & ~1) * 8;
-    v->alloc_height[BINK_PLANE_V] = ((v->cbh + 1) & ~1) * 8;
-    v->alloc_height[BINK_PLANE_A] = ((v->bh + 1) & ~1) * 8;
+    bink_plane_layout(width, height, 0, &v->plane_width[BINK_PLANE_Y],
+                      &v->plane_height[BINK_PLANE_Y], &v->bw, &v->bh,
+                      &v->stride[BINK_PLANE_Y], &v->alloc_height[BINK_PLANE_Y]);
+    bink_plane_layout(width, height, 1, &v->plane_width[BINK_PLANE_U],
+                      &v->plane_height[BINK_PLANE_U], &v->cbw, &v->cbh,
+                      &v->stride[BINK_PLANE_U], &v->alloc_height[BINK_PLANE_U]);
+    v->plane_width[BINK_PLANE_V] = v->plane_width[BINK_PLANE_U];
+    v->plane_height[BINK_PLANE_V] = v->plane_height[BINK_PLANE_U];
+    v->stride[BINK_PLANE_V] = v->stride[BINK_PLANE_U];
+    v->alloc_height[BINK_PLANE_V] = v->alloc_height[BINK_PLANE_U];
+    v->plane_width[BINK_PLANE_A] = v->plane_width[BINK_PLANE_Y];
+    v->plane_height[BINK_PLANE_A] = v->plane_height[BINK_PLANE_Y];
+    v->stride[BINK_PLANE_A] = v->stride[BINK_PLANE_Y];
+    v->alloc_height[BINK_PLANE_A] = v->alloc_height[BINK_PLANE_Y];
 
     for (i = 0; i < 4; i++) {
         size_t bytes;
@@ -560,17 +572,12 @@ const unsigned char *bink_video_rgb(BinkVideo *v)
 
 static void init_lengths(BinkVideo *v, int width, int bw)
 {
-    int w = (width + 7) & ~7;
+    int lens[BINK_NB_SRC];
+    int i;
 
-    v->bundles[BINK_SRC_BLOCK_TYPES].len = int_log2((unsigned)((w >> 3) + 511)) + 1;
-    v->bundles[BINK_SRC_SUB_BLOCK_TYPES].len = int_log2((unsigned)((w >> 4) + 511)) + 1;
-    v->bundles[BINK_SRC_COLORS].len = int_log2((unsigned)(bw * 64 + 511)) + 1;
-    v->bundles[BINK_SRC_INTRA_DC].len =
-    v->bundles[BINK_SRC_INTER_DC].len =
-    v->bundles[BINK_SRC_X_OFF].len =
-    v->bundles[BINK_SRC_Y_OFF].len = int_log2((unsigned)((w >> 3) + 511)) + 1;
-    v->bundles[BINK_SRC_PATTERN].len = int_log2((unsigned)((bw << 3) + 511)) + 1;
-    v->bundles[BINK_SRC_RUN].len = int_log2((unsigned)(bw * 48 + 511)) + 1;
+    bink_bundle_init_lengths(lens, width, bw);
+    for (i = 0; i < BINK_NB_SRC; i++)
+        v->bundles[i].len = lens[i];
 }
 
 static int read_bundle_header(BinkVideo *v, BinkBits *bits, int num)

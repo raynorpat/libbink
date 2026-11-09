@@ -301,50 +301,46 @@ static int align32_exact(BinkBits *bits)
     return 0;
 }
 
-static void setup_bands(BinkAudio *audio)
+static void setup_bands(BinkAudioInfo *info)
 {
-    unsigned long half = (audio->rate + 1UL) / 2UL;
+    unsigned long half = (info->rate + 1UL) / 2UL;
     int i;
 
-    audio->num_bands = 1;
-    while (audio->num_bands < 25) {
-        if (half <= bink_wma_critical_freqs[audio->num_bands - 1])
+    info->num_bands = 1;
+    while (info->num_bands < 25) {
+        if (half <= bink_wma_critical_freqs[info->num_bands - 1])
             break;
-        audio->num_bands++;
+        info->num_bands++;
     }
-    audio->bands[0] = 2;
-    for (i = 1; i < audio->num_bands; i++)
-        audio->bands[i] =
-            (bink_wma_critical_freqs[i - 1] * (unsigned)audio->frame_len /
+    info->bands[0] = 2;
+    for (i = 1; i < info->num_bands; i++)
+        info->bands[i] =
+            (bink_wma_critical_freqs[i - 1] * (unsigned)info->frame_len /
              (unsigned)half) & ~1U;
-    audio->bands[audio->num_bands] = (unsigned)audio->frame_len;
+    info->bands[info->num_bands] = (unsigned)info->frame_len;
 }
 
-int bink_audio_create(BinkAudio **out, unsigned long rate, int channels,
-                      int use_dct, unsigned long max_bytes)
+int bink_audio_describe(unsigned long rate, int channels, int use_dct,
+                        BinkAudioInfo *info)
 {
-    BinkAudio *audio;
     int bits;
     int bits_extra = 0;
     int i;
 
-    if (out == NULL || channels < 1 || channels > 2)
+    if (info == NULL || channels < 1 || channels > 2)
         return -1;
-    audio = (BinkAudio *)calloc(1, sizeof(*audio));
-    if (audio == NULL)
-        return -1;
-    audio->use_dct = use_dct;
-    audio->max_bytes = max_bytes;
+    memset(info, 0, sizeof(*info));
+    info->use_dct = use_dct;
     if (!use_dct) {
         /* Bands see rate * channels. The transform itself is one channel. */
-        audio->rate = rate * (unsigned long)channels;
+        info->rate = rate * (unsigned long)channels;
         if (channels == 2)
             bits_extra = 1;
-        channels = 1;
+        info->channels = 1;
     } else {
-        audio->rate = rate;
+        info->rate = rate;
+        info->channels = channels;
     }
-    audio->channels = channels;
 
     if (rate < 22050)
         bits = 9;
@@ -353,22 +349,48 @@ int bink_audio_create(BinkAudio **out, unsigned long rate, int channels,
     else
         bits = 11;
     bits += bits_extra;
-    audio->frame_len = 1 << bits;
-    audio->overlap_len = audio->frame_len / 16;
+    info->frame_len = 1 << bits;
+    if (info->frame_len > BINK_AUDIO_MAX_FRAME)
+        return -1;
+    info->overlap_len = info->frame_len / 16;
     if (use_dct)
-        audio->root = (float)((double)audio->frame_len /
-                              (sqrt((double)audio->frame_len) * 32768.0));
+        info->root = (float)((double)info->frame_len /
+                             (sqrt((double)info->frame_len) * 32768.0));
     else
-        audio->root = (float)(2.0 / (sqrt((double)audio->frame_len) * 32768.0));
+        info->root = (float)(2.0 / (sqrt((double)info->frame_len) * 32768.0));
     for (i = 0; i < 96; i++)
-        audio->quant_table[i] =
-            expf((float)i * 0.15289164787221953823f) * audio->root;
-    setup_bands(audio);
+        info->quant[i] =
+            expf((float)i * 0.15289164787221953823f) * info->root;
+    setup_bands(info);
+    return 0;
+}
+
+int bink_audio_create(BinkAudio **out, unsigned long rate, int channels,
+                      int use_dct, unsigned long max_bytes)
+{
+    BinkAudio *audio;
+    BinkAudioInfo info;
+
+    if (out == NULL || bink_audio_describe(rate, channels, use_dct, &info) != 0)
+        return -1;
+    audio = (BinkAudio *)calloc(1, sizeof(*audio));
+    if (audio == NULL)
+        return -1;
+    audio->use_dct = info.use_dct;
+    audio->max_bytes = max_bytes;
+    audio->rate = info.rate;
+    audio->channels = info.channels;
+    audio->frame_len = info.frame_len;
+    audio->overlap_len = info.overlap_len;
+    audio->num_bands = info.num_bands;
+    audio->root = info.root;
+    memcpy(audio->quant_table, info.quant, sizeof(audio->quant_table));
+    memcpy(audio->bands, info.bands, sizeof(audio->bands));
 
     audio->previous = (float *)calloc(
-        (size_t)channels * (size_t)audio->overlap_len, sizeof(float));
+        (size_t)audio->channels * (size_t)audio->overlap_len, sizeof(float));
     audio->block = (float *)calloc(
-        (size_t)channels * (size_t)audio->frame_len, sizeof(float));
+        (size_t)audio->channels * (size_t)audio->frame_len, sizeof(float));
     audio->pcm = (unsigned char *)malloc(max_bytes ? (size_t)max_bytes : 1);
     audio->fft_re = (double *)malloc((size_t)audio->frame_len * sizeof(double));
     audio->fft_im = (double *)malloc((size_t)audio->frame_len * sizeof(double));
@@ -582,4 +604,126 @@ unsigned long bink_audio_pcm_bytes(const BinkAudio *audio)
     if (audio == NULL)
         return 0;
     return audio->pcm_bytes;
+}
+
+static int write_float(BinkBitWriter *bw, float value)
+{
+    int sign = 0;
+    int exp;
+    int mantissa;
+    float mag;
+
+    if (value < 0.0f) {
+        sign = 1;
+        value = -value;
+    }
+    if (value == 0.0f)
+        return bink_bw_put(bw, 0, 29);
+
+    mag = frexpf(value, &exp);
+    mantissa = (int)lrintf(mag * 8388608.0f);
+    if (mantissa >= 8388608) {
+        mantissa >>= 1;
+        exp++;
+    }
+    while (exp < 0 && mantissa > 0) {
+        mantissa >>= 1;
+        exp++;
+    }
+    if (exp < 0)
+        exp = 0;
+    if (exp > 31) {
+        exp = 31;
+        mantissa = 0x7fffff;
+    }
+    if (bink_bw_put(bw, (unsigned)exp, 5) != 0)
+        return -1;
+    if (bink_bw_put(bw, (unsigned)mantissa, 23) != 0)
+        return -1;
+    return bink_bw_put(bw, (unsigned)sign, 1);
+}
+
+/* Response of dct_iii at the middle sample when src[0] is 1. */
+static int dc_response(int n, float *gain)
+{
+    static float cached[13];
+    static unsigned char ready[13];
+    int bits = 0;
+    int value = n;
+    float *src;
+    float *dst;
+    double *re;
+    double *im;
+
+    while (value > 1) {
+        value >>= 1;
+        bits++;
+    }
+    if (n < 2 || n != (1 << bits) || bits >= 13)
+        return -1;
+    if (!ready[bits]) {
+        src = (float *)calloc((size_t)n, sizeof(float));
+        dst = (float *)calloc((size_t)n, sizeof(float));
+        re = (double *)calloc((size_t)n, sizeof(double));
+        im = (double *)calloc((size_t)n, sizeof(double));
+        if (src == NULL || dst == NULL || re == NULL || im == NULL) {
+            free(src);
+            free(dst);
+            free(re);
+            free(im);
+            return -1;
+        }
+        src[0] = 1.0f;
+        dct_iii(dst, src, n, re, im);
+        cached[bits] = dst[n / 2];
+        ready[bits] = 1;
+        free(src);
+        free(dst);
+        free(re);
+        free(im);
+    }
+    if (cached[bits] == 0.0f)
+        return -1;
+    *gain = cached[bits];
+    return 0;
+}
+
+int bink_audio_write_dc_block(BinkBitWriter *bw, const BinkAudioInfo *info,
+                              const float *channel_mean)
+{
+    int ch;
+    int i;
+    float gain = 1.0f;
+
+    if (bw == NULL || info == NULL || channel_mean == NULL)
+        return -1;
+    if (info->use_dct) {
+        if (dc_response(info->frame_len, &gain) != 0)
+            return -1;
+        if (bink_bw_put(bw, 0, 2) != 0)
+            return -1;
+    }
+    for (ch = 0; ch < info->channels; ch++) {
+        float coded = 0.0f;
+
+        if (info->use_dct)
+            coded = channel_mean[ch] / (gain * info->root * 2.0f);
+        if (write_float(bw, coded) != 0)
+            return -1;
+        if (write_float(bw, 0.0f) != 0)
+            return -1;
+        for (i = 0; i < info->num_bands; i++) {
+            if (bink_bw_put(bw, 0, 8) != 0)
+                return -1;
+        }
+        i = 2;
+        while (i < info->frame_len) {
+            if (bink_bw_put(bw, 0, 1) != 0)
+                return -1;
+            if (bink_bw_put(bw, 0, 4) != 0)
+                return -1;
+            i += 8;
+        }
+    }
+    return 0;
 }

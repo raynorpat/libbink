@@ -1,6 +1,7 @@
 #include "bink_bits.h"
 #include "bink_huffdata.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #define BINK_TREE_MAX_BITS 7
@@ -220,4 +221,144 @@ int bink_tree_decode(BinkBits *bits, const BinkTree *tree)
         return -1;
     bits->bitpos += (size_t)len;
     return tree->syms[huff_syms[tree->vlc_num][peek]];
+}
+
+void bink_bw_init(BinkBitWriter *bw)
+{
+    bw->data = NULL;
+    bw->capacity = 0;
+    bw->bitpos = 0;
+}
+
+void bink_bw_free(BinkBitWriter *bw)
+{
+    if (bw == NULL)
+        return;
+    free(bw->data);
+    bw->data = NULL;
+    bw->capacity = 0;
+    bw->bitpos = 0;
+}
+
+void bink_bw_reset(BinkBitWriter *bw)
+{
+    bw->bitpos = 0;
+    if (bw->data != NULL && bw->capacity > 0)
+        memset(bw->data, 0, bw->capacity);
+}
+
+static int bink_bw_ensure(BinkBitWriter *bw, size_t bitpos)
+{
+    size_t need = (bitpos + 7) / 8;
+    size_t cap;
+    unsigned char *grown;
+
+    if (need <= bw->capacity)
+        return 0;
+    cap = bw->capacity != 0 ? bw->capacity : 256;
+    while (cap < need) {
+        if (cap > (size_t)-1 / 2)
+            return -1;
+        cap *= 2;
+    }
+    grown = (unsigned char *)realloc(bw->data, cap);
+    if (grown == NULL)
+        return -1;
+    memset(grown + bw->capacity, 0, cap - bw->capacity);
+    bw->data = grown;
+    bw->capacity = cap;
+    return 0;
+}
+
+int bink_bw_put(BinkBitWriter *bw, unsigned value, int count)
+{
+    int i;
+
+    if (bw == NULL || count < 0 || count > 32)
+        return -1;
+    if (count == 0)
+        return 0;
+    if (bink_bw_ensure(bw, bw->bitpos + (size_t)count) != 0)
+        return -1;
+    for (i = 0; i < count; i++) {
+        size_t pos = bw->bitpos + (size_t)i;
+
+        if ((value >> i) & 1u)
+            bw->data[pos >> 3] =
+                (unsigned char)(bw->data[pos >> 3] | (1u << (pos & 7)));
+    }
+    bw->bitpos += (size_t)count;
+    return 0;
+}
+
+int bink_bw_align32(BinkBitWriter *bw)
+{
+    size_t next;
+
+    if (bw == NULL)
+        return -1;
+    next = (bw->bitpos + 31) & ~(size_t)31;
+    if (bink_bw_ensure(bw, next) != 0)
+        return -1;
+    bw->bitpos = next;
+    return 0;
+}
+
+size_t bink_bw_bitpos(const BinkBitWriter *bw)
+{
+    return bw->bitpos;
+}
+
+size_t bink_bw_bytes(const BinkBitWriter *bw)
+{
+    return (bw->bitpos + 7) / 8;
+}
+
+const unsigned char *bink_bw_data(const BinkBitWriter *bw)
+{
+    return bw->data;
+}
+
+int bink_huff_best(const unsigned freq[16])
+{
+    int best = 0;
+    unsigned best_bits = ~0u;
+    int v;
+    int s;
+
+    for (v = 0; v < 16; v++) {
+        unsigned bits = (v == 0) ? 4u : 12u;
+
+        for (s = 0; s < 16; s++)
+            bits += freq[s] * (unsigned)bink_tree_lens[v][s];
+        if (bits < best_bits) {
+            best_bits = bits;
+            best = v;
+        }
+    }
+    return best;
+}
+
+int bink_huff_put(BinkBitWriter *bw, int vlc, int symbol)
+{
+    if (vlc < 0 || vlc > 15 || symbol < 0 || symbol > 15)
+        return -1;
+    return bink_bw_put(bw, bink_tree_bits[vlc][symbol],
+                       bink_tree_lens[vlc][symbol]);
+}
+
+int bink_tree_write_identity(BinkBitWriter *bw, int vlc)
+{
+    if (vlc < 0 || vlc > 15)
+        return -1;
+    if (bink_bw_put(bw, (unsigned)vlc, 4) != 0)
+        return -1;
+    if (vlc == 0)
+        return 0;
+    /* One explicit symbol (0). The reader fills 1..15 in order. */
+    if (bink_bw_put(bw, 1, 1) != 0)
+        return -1;
+    if (bink_bw_put(bw, 0, 3) != 0)
+        return -1;
+    return bink_bw_put(bw, 0, 4);
 }

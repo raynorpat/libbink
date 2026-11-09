@@ -23,6 +23,15 @@ add_executable(player player.c)
 target_link_libraries(player PRIVATE Bink::bink)
 ```
 
+The encoder is a separate static library. Link `bink_encoder` (CMake alias
+`Bink::encoder`, archive name `binkenc`) and include `bink_encoder.h`. It
+uses the decoder library. See `docs/encoder.md`.
+
+```cmake
+add_executable(make_bik make_bik.c)
+target_link_libraries(make_bik PRIVATE Bink::encoder)
+```
+
 ## Quick start
 
 ```c
@@ -284,6 +293,18 @@ handles may be used concurrently.
 - Seeking is keyframe-only. These files use frame 0 as the only keyframe.
 
 ## Example programs
+
+`bink_build` encodes a directory of `.ppm`, `.bmp`, `.png`, `.jpg`, and
+`.jpeg` frames, or a single image, into a `BIKi` file. `--audio` attaches
+one PCM WAV. `--verify` decodes the file and compares the visible YUV
+planes. Exit codes are
+`0` success, `1` usage, `2` bad input, `3` encode failure, `4` verify
+failure. An encode failure deletes the partial output; a verify failure
+leaves the file. Details are in `docs/encoder.md`.
+
+```sh
+bink_build frames/ -o out.bik --fps 15 --audio sound.wav --verify
+```
 
 `bink_dump` writes PPM images and FNV-1a plane hashes without a display:
 
