@@ -1206,6 +1206,414 @@ done:
     return rc;
 }
 
+/* A short video clip carrying a sine (or two, for stereo). */
+typedef struct {
+    uint8_t *frames;
+    int16_t *pcm;
+    size_t samples;
+    mem_source mem;
+} sine_clip;
+
+static void free_sine(sine_clip *clip)
+{
+    free(clip->frames);
+    free(clip->pcm);
+    memset(clip, 0, sizeof(*clip));
+}
+
+static int make_sine(sine_clip *clip, unsigned rate, unsigned channels,
+                     double freq_l, double freq_r, unsigned seconds)
+{
+    enum { W = 8, H = 8 };
+    size_t per_frame = (size_t)W * H * 3;
+    unsigned nframes = seconds * 15;
+    size_t n = (size_t)rate * seconds;
+    size_t i;
+
+    memset(clip, 0, sizeof(*clip));
+    clip->frames = (uint8_t *)calloc(nframes, per_frame);
+    clip->pcm = (int16_t *)malloc(n * channels * sizeof(int16_t));
+    if (clip->frames == NULL || clip->pcm == NULL) {
+        free_sine(clip);
+        return -1;
+    }
+    for (i = 0; i < nframes; i++)
+        fill_rgb(clip->frames + i * per_frame, W, H, 10, 20, 30);
+    for (i = 0; i < n; i++) {
+        clip->pcm[i * channels] =
+            (int16_t)lrint(12000.0 * sin(2.0 * M_PI * freq_l * (double)i /
+                                         (double)rate));
+        if (channels == 2)
+            clip->pcm[i * channels + 1] =
+                (int16_t)lrint(12000.0 * sin(2.0 * M_PI * freq_r * (double)i /
+                                             (double)rate));
+    }
+    clip->samples = n;
+    clip->mem.frames = clip->frames;
+    clip->mem.width = W;
+    clip->mem.height = H;
+    clip->mem.count = nframes;
+    clip->mem.channels = channels;
+    clip->mem.pcm = clip->pcm;
+    clip->mem.sample_count = n;
+    clip->mem.fail_index = -1;
+    return 0;
+}
+
+static bink_enc_status encode_sine(sine_clip *clip, const char *name,
+                                   unsigned rate, char *err, size_t errlen)
+{
+    bink_enc_options opt;
+    char path[1024];
+
+    bink_enc_options_default(&opt);
+    opt.verify = 1;
+    opt.motion_range = 0;
+    path_for(path, sizeof(path), name);
+    err[0] = '\0';
+    return encode_mem(&clip->mem, &opt, path, rate, err, errlen);
+}
+
+static double decoded_snr(const int16_t *decoded, size_t decoded_count,
+                          const int16_t *source, size_t source_count,
+                          unsigned channels)
+{
+    double signal = 0.0;
+    double noise = 0.0;
+    size_t n;
+    size_t limit = decoded_count < source_count ? decoded_count : source_count;
+
+    for (n = 0; n < limit; n++) {
+        size_t c;
+
+        for (c = 0; c < channels; c++) {
+            double s = (double)source[n * channels + c];
+            double d = (double)decoded[n * channels + c] - s;
+
+            signal += s * s;
+            noise += d * d;
+        }
+    }
+    if (noise <= 0.0)
+        return 999.0;
+    if (signal <= 0.0)
+        return -999.0;
+    return 10.0 * log10(signal / noise);
+}
+
+static double count_crossings(const int16_t *pcm, size_t first, size_t count,
+                              unsigned stride, unsigned offset)
+{
+    double crossings = 0.0;
+    size_t n;
+
+    for (n = first + 1; n < count; n++) {
+        int a = pcm[(n - 1) * stride + offset];
+        int b = pcm[n * stride + offset];
+
+        if ((a < 0) != (b < 0))
+            crossings += 1.0;
+    }
+    return crossings;
+}
+
+/* Silence is the case zero-run coding exists for: without it every block
+ * still pays a chunk header per eight zero coefficients. */
+static int test_audio_silence_rle(void)
+{
+    enum { RATE = 44100 };
+    sine_clip clip;
+    char path[1024];
+    char err[256];
+    bink_enc_status status;
+    struct stat st;
+    int rc = 1;
+
+    if (make_sine(&clip, RATE, 1, 440.0, 0.0, 1) != 0) {
+        fprintf(stderr, "FAIL audio silence: out of memory\n");
+        return 1;
+    }
+    memset(clip.pcm, 0, clip.samples * sizeof(int16_t));
+    path_for(path, sizeof(path), "silence_rle.bik");
+    status = encode_sine(&clip, "silence_rle.bik", RATE, err, sizeof(err));
+    if (expect_ok(status, err, "audio silence") != 0)
+        goto done;
+    if (stat(path, &st) != 0) {
+        fprintf(stderr, "FAIL audio silence: no output file\n");
+        goto done;
+    }
+    /* The 15 small video frames cost about 1.3 kB on their own; without
+     * zero-run coding the silent audio adds another 4.6 kB. */
+    if (st.st_size >= 3200) {
+        fprintf(stderr, "FAIL audio silence: %ld bytes\n", (long)st.st_size);
+        goto done;
+    }
+    rc = 0;
+done:
+    remove(path);
+    free_sine(&clip);
+    return rc;
+}
+
+static int test_audio_sine_snr(void)
+{
+    enum { RATE = 44100, FREQ = 440 };
+    sine_clip clip;
+    char path[1024];
+    char err[256];
+    bink_enc_status status;
+    int16_t *decoded = NULL;
+    size_t decoded_count = 0;
+    int channels = 0;
+    double snr;
+    int rc = 1;
+
+    if (make_sine(&clip, RATE, 1, FREQ, 0.0, 1) != 0) {
+        fprintf(stderr, "FAIL audio snr: out of memory\n");
+        return 1;
+    }
+    path_for(path, sizeof(path), "sine_snr.bik");
+    status = encode_sine(&clip, "sine_snr.bik", RATE, err, sizeof(err));
+    if (expect_ok(status, err, "audio snr") != 0)
+        goto done;
+    if (collect_audio(path, &decoded, &decoded_count, &channels) != 0)
+        goto done;
+    if (channels != 1) {
+        fprintf(stderr, "FAIL audio snr: %d channels\n", channels);
+        goto done;
+    }
+    snr = decoded_snr(decoded, decoded_count, clip.pcm, clip.samples, 1);
+    if (snr < 20.0) {
+        fprintf(stderr, "FAIL audio snr: %.2f dB\n", snr);
+        goto done;
+    }
+    rc = 0;
+done:
+    remove(path);
+    free(decoded);
+    free_sine(&clip);
+    return rc;
+}
+
+static int test_audio_size(void)
+{
+    enum { RATE = 44100, FREQ = 440 };
+    sine_clip clip;
+    char path[1024];
+    char err[256];
+    bink_enc_status status;
+    struct stat st;
+    int rc = 1;
+
+    if (make_sine(&clip, RATE, 1, FREQ, 0.0, 1) != 0) {
+        fprintf(stderr, "FAIL audio size: out of memory\n");
+        return 1;
+    }
+    path_for(path, sizeof(path), "sine_size.bik");
+    status = encode_sine(&clip, "sine_size.bik", RATE, err, sizeof(err));
+    if (expect_ok(status, err, "audio size") != 0)
+        goto done;
+    if (stat(path, &st) != 0) {
+        fprintf(stderr, "FAIL audio size: no output file\n");
+        goto done;
+    }
+    /* Regression guard only: per-band coding spends bits on the tone's
+     * spectral leakage, which measures about 32.9 kB for this signal. */
+    if (st.st_size >= 40000) {
+        fprintf(stderr, "FAIL audio size: %ld bytes for %zu samples\n",
+                (long)st.st_size, clip.samples);
+        goto done;
+    }
+    rc = 0;
+done:
+    remove(path);
+    free_sine(&clip);
+    return rc;
+}
+
+/* Magnitude of one frequency in a PCM stream, Goertzel style. */
+static double tone_magnitude(const int16_t *pcm, size_t count,
+                             unsigned stride, unsigned offset, unsigned rate,
+                             double freq, size_t skip)
+{
+    double re = 0.0;
+    double im = 0.0;
+    size_t n;
+
+    for (n = skip; n < count; n++) {
+        double angle = 2.0 * M_PI * freq * (double)n / (double)rate;
+        double s = (double)pcm[n * stride + offset];
+
+        re += s * cos(angle);
+        im += s * sin(angle);
+    }
+    return sqrt(re * re + im * im) / (double)(count - skip);
+}
+
+/* A wide dynamic range is what per-band quantizers buy: one global step sized
+ * for the loudest partial turns the quiet ones into a single count. */
+static int test_audio_quiet_bands(void)
+{
+    enum { RATE = 44100, TONES = 7 };
+    static const double freqs[TONES] = { 200,  800,  2000, 4000,
+                                         6500, 9500, 13000 };
+    static const double amps[TONES] = { 12000, 3000, 800, 200, 60, 18, 5 };
+    sine_clip clip;
+    char path[1024];
+    char err[256];
+    bink_enc_status status;
+    int16_t *decoded = NULL;
+    size_t decoded_count = 0;
+    int channels = 0;
+    size_t i;
+    int j;
+    int rc = 1;
+
+    if (make_sine(&clip, RATE, 1, 1000.0, 0.0, 1) != 0) {
+        fprintf(stderr, "FAIL audio bands: out of memory\n");
+        return 1;
+    }
+    for (i = 0; i < clip.samples; i++) {
+        double sum = 0.0;
+
+        for (j = 0; j < TONES; j++)
+            sum += amps[j] * sin(2.0 * M_PI * freqs[j] * (double)i /
+                                 (double)RATE);
+        clip.pcm[i] = (int16_t)lrint(sum);
+    }
+    path_for(path, sizeof(path), "quiet_bands.bik");
+    status = encode_sine(&clip, "quiet_bands.bik", RATE, err, sizeof(err));
+    if (expect_ok(status, err, "audio bands") != 0)
+        goto done;
+    if (collect_audio(path, &decoded, &decoded_count, &channels) != 0)
+        goto done;
+    if (channels != 1 || decoded_count < (size_t)RATE / 2) {
+        fprintf(stderr, "FAIL audio bands: %zu samples\n", decoded_count);
+        goto done;
+    }
+    for (j = 0; j < TONES; j++) {
+        double source = tone_magnitude(clip.pcm, clip.samples, 1, 0, RATE,
+                                       freqs[j], 2048);
+        double got = tone_magnitude(decoded, decoded_count, 1, 0, RATE,
+                                    freqs[j], 2048);
+
+        if (source < 1.0)
+            continue;
+        if (got < source * 0.6) {
+            fprintf(stderr,
+                    "FAIL audio bands: %.0f Hz survived at %.1f of %.1f\n",
+                    freqs[j], got, source);
+            goto done;
+        }
+    }
+    rc = 0;
+done:
+    remove(path);
+    free(decoded);
+    free_sine(&clip);
+    return rc;
+}
+
+static int test_audio_stereo_channels(void)
+{
+    enum { RATE = 44100, LEFT = 440, RIGHT = 660 };
+    sine_clip clip;
+    char path[1024];
+    char err[256];
+    bink_enc_status status;
+    int16_t *decoded = NULL;
+    size_t decoded_count = 0;
+    int channels = 0;
+    double left;
+    double right;
+    double expected_left;
+    double expected_right;
+    int rc = 1;
+
+    if (make_sine(&clip, RATE, 2, LEFT, RIGHT, 1) != 0) {
+        fprintf(stderr, "FAIL audio stereo: out of memory\n");
+        return 1;
+    }
+    path_for(path, sizeof(path), "stereo_channels.bik");
+    status = encode_sine(&clip, "stereo_channels.bik", RATE, err,
+                         sizeof(err));
+    if (expect_ok(status, err, "audio stereo") != 0)
+        goto done;
+    if (collect_audio(path, &decoded, &decoded_count, &channels) != 0)
+        goto done;
+    if (channels != 2) {
+        fprintf(stderr, "FAIL audio stereo: %d channels\n", channels);
+        goto done;
+    }
+    left = count_crossings(decoded, 0, decoded_count / 2, 2, 0);
+    right = count_crossings(decoded, 0, decoded_count / 2, 2, 1);
+    expected_left = 2.0 * LEFT * (double)decoded_count / 2.0 / (double)RATE;
+    expected_right = 2.0 * RIGHT * (double)decoded_count / 2.0 / (double)RATE;
+    if (fabs(left - expected_left) > expected_left * 0.01 ||
+        fabs(right - expected_right) > expected_right * 0.01 ||
+        fabs(left - right) < 50.0) {
+        fprintf(stderr, "FAIL audio stereo: %.0f/%.0f crossings, expected %.0f/%.0f\n",
+                left, right, expected_left, expected_right);
+        goto done;
+    }
+    rc = 0;
+done:
+    remove(path);
+    free(decoded);
+    free_sine(&clip);
+    return rc;
+}
+
+static int test_audio_rates(void)
+{
+    static const unsigned rates[2] = { 22050, 48000 };
+    enum { FREQ = 440 };
+    int r;
+    int rc = 0;
+
+    for (r = 0; r < 2; r++) {
+        sine_clip clip;
+        char path[1024];
+        char err[256];
+        bink_enc_status status;
+        int16_t *decoded = NULL;
+        size_t decoded_count = 0;
+        int channels = 0;
+        double crossings;
+        double estimate;
+        char name[64];
+
+        if (make_sine(&clip, rates[r], 1, FREQ, 0.0, 1) != 0) {
+            fprintf(stderr, "FAIL audio rates: out of memory\n");
+            return 1;
+        }
+        snprintf(name, sizeof(name), "rate_%u.bik", rates[r]);
+        path_for(path, sizeof(path), name);
+        status = encode_sine(&clip, name, rates[r], err, sizeof(err));
+        if (expect_ok(status, err, "audio rates") != 0) {
+            free_sine(&clip);
+            return 1;
+        }
+        if (collect_audio(path, &decoded, &decoded_count, &channels) != 0) {
+            free_sine(&clip);
+            return 1;
+        }
+        crossings = count_crossings(decoded, 0, decoded_count, 1, 0);
+        estimate = crossings * (double)rates[r] / (2.0 * (double)decoded_count);
+        if (fabs(estimate - (double)FREQ) > (double)FREQ * 0.02) {
+            fprintf(stderr, "FAIL audio rates %u: %.1f Hz\n", rates[r],
+                    estimate);
+            rc = 1;
+        }
+        free(decoded);
+        remove(path);
+        free_sine(&clip);
+        if (rc != 0)
+            break;
+    }
+    return rc;
+}
+
 static int test_audio(void)
 {
     enum { W = 8, H = 8 };
@@ -1839,6 +2247,18 @@ int main(void)
     if (test_audio() != 0)
         return 1;
     if (test_audio_sine_frequency() != 0)
+        return 1;
+    if (test_audio_sine_snr() != 0)
+        return 1;
+    if (test_audio_silence_rle() != 0)
+        return 1;
+    if (test_audio_quiet_bands() != 0)
+        return 1;
+    if (test_audio_size() != 0)
+        return 1;
+    if (test_audio_stereo_channels() != 0)
+        return 1;
+    if (test_audio_rates() != 0)
         return 1;
     if (test_failure_keeps_or_removes() != 0)
         return 1;

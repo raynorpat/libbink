@@ -668,25 +668,29 @@ float *bink_audio_dct_table(int frame_len)
 int bink_audio_write_dct_block(BinkBitWriter *bw, const BinkAudioInfo *info,
                                const float *const out[2], const float *tab)
 {
+    static const unsigned char rle_length[16] = {
+        2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15, 16, 32, 64
+    };
     double *coef;
+    int *qidx;
+    int band_q[25];
     int ch;
 
     if (bw == NULL || info == NULL || out == NULL || tab == NULL)
         return -1;
     if (!info->use_dct || info->frame_len <= 0 ||
         info->frame_len > BINK_AUDIO_MAX_FRAME || info->channels < 1 ||
-        info->channels > 2 || out[0] == NULL)
+        info->channels > 2 || out[0] == NULL || info->num_bands < 1 ||
+        info->num_bands > 25)
         return -1;
     coef = (double *)malloc((size_t)info->frame_len * sizeof(*coef));
-    if (coef == NULL)
-        return -1;
-    if (bink_bw_put(bw, 0, 2) != 0)
+    qidx = (int *)malloc((size_t)info->frame_len * sizeof(*qidx));
+    if (coef == NULL || qidx == NULL || bink_bw_put(bw, 0, 2) != 0)
         goto fail;
 
     for (ch = 0; ch < info->channels; ch++) {
         const float *src = out[ch];
-        double maxabs = 0.0;
-        int q = 0;
+        int b;
         int i;
 
         if (src == NULL)
@@ -705,30 +709,77 @@ int bink_audio_write_dct_block(BinkBitWriter *bw, const BinkAudioInfo *info,
         if (write_float(bw, (float)(coef[0] / (double)info->root)) != 0 ||
             write_float(bw, (float)(coef[1] / (double)info->root)) != 0)
             goto fail;
-        for (i = 2; i < info->frame_len; i++) {
-            double mag = fabs(coef[i]);
 
-            if (mag > maxabs)
-                maxabs = mag;
-        }
-        /* One quantizer for the frame in this version; adaptive per band
-         * arrives next. */
-        while (q < 95 && maxabs / (double)info->quant[q] > 1023.0)
-            q++;
-        for (i = 0; i < info->num_bands; i++) {
+        /* One quantizer per band, sized to that band's loudest coefficient. */
+        for (b = 0; b < info->num_bands; b++) {
+            int hi = b + 1 < info->num_bands ? (int)info->bands[b + 1]
+                                             : info->frame_len;
+            int lo = (int)info->bands[b];
+            double maxabs = 0.0;
+            int q = 0;
+
+            if (lo < 2)
+                lo = 2;
+            if (hi > info->frame_len)
+                hi = info->frame_len;
+            for (i = lo; i < hi; i++) {
+                double mag = fabs(coef[i]);
+
+                if (mag > maxabs)
+                    maxabs = mag;
+            }
+            if (maxabs > 0.0) {
+                while (q < 95 && maxabs / (double)info->quant[q] > 1023.0)
+                    q++;
+            }
+            band_q[b] = q;
             if (bink_bw_put(bw, (unsigned)q, 8) != 0)
                 goto fail;
         }
+        b = 0;
+        for (i = 0; i < info->frame_len; i++) {
+            while (b + 1 < info->num_bands && (int)info->bands[b + 1] <= i)
+                b++;
+            qidx[i] = band_q[b < info->num_bands ? b : info->num_bands - 1];
+        }
+
         i = 2;
         while (i < info->frame_len) {
-            int j = i + 8;
+            int run = -1;
+            int entry;
+            int j;
             int width = 0;
             int k;
 
+            /* Longest all-zero span the RLE table can express from here. */
+            for (entry = 15; entry >= 0; entry--) {
+                int span = (int)rle_length[entry] * 8;
+                int m;
+
+                if (i + span > info->frame_len)
+                    continue;
+                for (m = i; m < i + span; m++) {
+                    if (lround(coef[m] / (double)info->quant[qidx[m]]) != 0)
+                        break;
+                }
+                if (m == i + span) {
+                    run = entry;
+                    break;
+                }
+            }
+            if (run >= 0) {
+                if (bink_bw_put(bw, 1, 1) != 0 ||
+                    bink_bw_put(bw, (unsigned)run, 4) != 0 ||
+                    bink_bw_put(bw, 0, 4) != 0)
+                    goto fail;
+                i += (int)rle_length[run] * 8;
+                continue;
+            }
+            j = i + 8;
             if (j > info->frame_len)
                 j = info->frame_len;
             for (k = i; k < j; k++) {
-                long m = lround(coef[k] / (double)info->quant[q]);
+                long m = lround(coef[k] / (double)info->quant[qidx[k]]);
                 unsigned long mag = m < 0 ? (unsigned long)(-m)
                                           : (unsigned long)m;
                 int bits = 0;
@@ -742,12 +793,11 @@ int bink_audio_write_dct_block(BinkBitWriter *bw, const BinkAudioInfo *info,
             }
             if (width > 15)
                 goto fail;
-            /* No zero-run coding yet: an all-zero chunk is width 0. */
             if (bink_bw_put(bw, 0, 1) != 0 ||
                 bink_bw_put(bw, (unsigned)width, 4) != 0)
                 goto fail;
             for (k = i; k < j && width != 0; k++) {
-                long m = lround(coef[k] / (double)info->quant[q]);
+                long m = lround(coef[k] / (double)info->quant[qidx[k]]);
                 unsigned long mag = m < 0 ? (unsigned long)(-m)
                                           : (unsigned long)m;
 
@@ -760,8 +810,10 @@ int bink_audio_write_dct_block(BinkBitWriter *bw, const BinkAudioInfo *info,
         }
     }
     free(coef);
+    free(qidx);
     return 0;
 fail:
     free(coef);
+    free(qidx);
     return -1;
 }
