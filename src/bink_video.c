@@ -630,10 +630,12 @@ static int get_value(BinkVideo *v, int bundle)
     if (b->cur_ptr == NULL || b->data_end - b->cur_ptr < 2)
         return BINK_VALUE_ERROR;
     {
-        int value = (int)b->cur_ptr[0] | ((int)b->cur_ptr[1] << 8);
+        /* bink_bundle_read_dcs stores host-order int16_t. */
+        int16_t value;
 
+        memcpy(&value, b->cur_ptr, sizeof(value));
         b->cur_ptr += 2;
-        return (int)(int16_t)value;
+        return (int)value;
     }
 }
 
@@ -793,12 +795,15 @@ static void unquantize_dct_coeffs(int32_t block[64], const int32_t quant[64],
 {
     int i;
 
-    block[0] = (int)(block[0] * quant[0]) >> 11;
+    /* Unsigned multiply: a corrupt stream can overflow 32 bits, and the
+     * product must wrap (as FFmpeg's does) rather than be undefined. */
+    block[0] = (int32_t)((uint32_t)block[0] * (uint32_t)quant[0]) >> 11;
     for (i = 0; i < coef_count; i++) {
         int idx = coef_idx[i];
 
         block[bink_scan[idx]] =
-            (int)(block[bink_scan[idx]] * quant[idx]) >> 11;
+            (int32_t)((uint32_t)block[bink_scan[idx]] *
+                      (uint32_t)quant[idx]) >> 11;
     }
 }
 
@@ -1011,16 +1016,18 @@ static int bink_put_pixels(BinkVideo *v, unsigned char *dst,
 {
     int xoff = get_value(v, BINK_SRC_X_OFF);
     int yoff = get_value(v, BINK_SRC_Y_OFF);
-    unsigned char *ref;
+    ptrdiff_t offset;
 
     if (xoff == BINK_VALUE_ERROR || yoff == BINK_VALUE_ERROR)
         return -1;
-    ref = prev + xoff + (size_t)yoff * (size_t)stride;
-    if (ref < ref_start || ref > ref_end)
+    /* Range-check the offset as an integer; forming an out-of-range
+     * pointer first would be undefined. */
+    offset = (prev - ref_start) + xoff + (ptrdiff_t)yoff * stride;
+    if (offset < 0 || offset > ref_end - ref_start)
         return 0; /* invalid stream: leave the destination block unchanged */
     *xoff_out = xoff;
     *yoff_out = yoff;
-    copy_block_overlapped(dst, ref, stride);
+    copy_block_overlapped(dst, ref_start + offset, stride);
     return 0;
 }
 
@@ -1397,12 +1404,46 @@ static int decode_plane(BinkVideo *v, BinkBits *bits, int plane, int is_chroma)
     return 0;
 }
 
+static void swap_planes(BinkVideo *v)
+{
+    int i;
+
+    for (i = 0; i < 4; i++) {
+        unsigned char *swap = v->cur[i];
+
+        v->cur[i] = v->ref[i];
+        v->ref[i] = swap;
+    }
+}
+
+static int decode_planes(BinkVideo *v, BinkBits *bits)
+{
+    int plane;
+
+    if (v->has_alpha) {
+        if (v->version >= 'i')
+            bink_bits_skip(bits, 32);
+        if (decode_plane(v, bits, BINK_PLANE_A, 0) < 0)
+            return -1;
+    }
+    if (v->version >= 'i')
+        bink_bits_skip(bits, 32);
+
+    for (plane = 0; plane < 3; plane++) {
+        int plane_idx = (!plane || !v->swap_planes) ? plane : (plane ^ 3);
+
+        if (decode_plane(v, bits, plane_idx, !!plane) < 0)
+            return -1;
+        if (bink_bits_left(bits) <= 0)
+            break;
+    }
+    return 0;
+}
+
 int bink_video_decode(BinkVideo *v, const unsigned char *data, size_t size)
 {
     BinkBits bits;
-    int plane;
-    int ret;
-    int i;
+    int swapped;
 
     if (v == NULL || data == NULL)
         return -1;
@@ -1417,33 +1458,16 @@ int bink_video_decode(BinkVideo *v, const unsigned char *data, size_t size)
     /* Ping-pong: decode into the buffer that is not the current reference.
      * On the first frame there is no reference, so the decoder reads back
      * from the buffer it is writing (matching FFmpeg's first-frame path). */
-    if (v->has_prev) {
-        for (i = 0; i < 4; i++) {
-            unsigned char *swap = v->cur[i];
+    swapped = v->has_prev;
+    if (swapped)
+        swap_planes(v);
 
-            v->cur[i] = v->ref[i];
-            v->ref[i] = swap;
-        }
-    }
-
-    if (v->has_alpha) {
-        if (v->version >= 'i')
-            bink_bits_skip(&bits, 32);
-        ret = decode_plane(v, &bits, BINK_PLANE_A, 0);
-        if (ret < 0)
-            return -1;
-    }
-    if (v->version >= 'i')
-        bink_bits_skip(&bits, 32);
-
-    for (plane = 0; plane < 3; plane++) {
-        int plane_idx = (!plane || !v->swap_planes) ? plane : (plane ^ 3);
-
-        ret = decode_plane(v, &bits, plane_idx, !!plane);
-        if (ret < 0)
-            return -1;
-        if (bink_bits_left(&bits) <= 0)
-            break;
+    if (decode_planes(v, &bits) < 0) {
+        /* Swap back so the planes, the RGB cache and the next frame's
+         * reference all stay on the last frame that decoded completely. */
+        if (swapped)
+            swap_planes(v);
+        return -1;
     }
 
     v->has_prev = 1;

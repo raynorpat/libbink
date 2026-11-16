@@ -3,6 +3,7 @@
 #include "bink_dsp.h"
 #include "bink_enc_dct.h"
 #include "bink_enc_image.h"
+#include "bink_enc_verify.h"
 #include "bink_enc_video.h"
 #include "bink_enc_wav.h"
 #include "bink_encoder.h"
@@ -1583,6 +1584,94 @@ done:
     return rc;
 }
 
+/* --verify compares decoded samples, not just packet sizes: the same file
+ * passes against its own source and fails against a source whose audio has
+ * the opposite polarity. */
+static int test_verify_checks_audio_samples(void)
+{
+    enum { RATE = 22050, FREQ = 330, AMPLITUDE = 9000, VIDEO_FRAMES = 8 };
+    enum { W = 8, H = 8, SAMPLES = RATE / 2 };
+    uint8_t *frames;
+    int16_t *pcm;
+    int16_t *flipped;
+    mem_source mem;
+    bink_enc_source source;
+    bink_enc_options opt;
+    char path[1024];
+    char err[256];
+    unsigned i;
+    int rc = 1;
+
+    path_for(path, sizeof(path), "verify_audio.bik");
+    frames = (uint8_t *)calloc(VIDEO_FRAMES, (size_t)W * H * 3);
+    pcm = (int16_t *)malloc((size_t)SAMPLES * sizeof(*pcm));
+    flipped = (int16_t *)malloc((size_t)SAMPLES * sizeof(*flipped));
+    if (frames == NULL || pcm == NULL || flipped == NULL) {
+        fprintf(stderr, "FAIL verify audio: out of memory\n");
+        goto done;
+    }
+    for (i = 0; i < VIDEO_FRAMES; i++)
+        fill_rgb(frames + (size_t)i * W * H * 3, W, H, 10, 20, 30);
+    for (i = 0; i < SAMPLES; i++) {
+        pcm[i] = (int16_t)lrint(AMPLITUDE * sin(2.0 * M_PI * FREQ * (double)i /
+                                               (double)RATE));
+        flipped[i] = (int16_t)-pcm[i];
+    }
+
+    memset(&mem, 0, sizeof(mem));
+    mem.frames = frames;
+    mem.width = W;
+    mem.height = H;
+    mem.count = VIDEO_FRAMES;
+    mem.channels = 1;
+    mem.pcm = pcm;
+    mem.sample_count = SAMPLES;
+    mem.fail_index = -1;
+    bink_enc_options_default(&opt);
+    opt.verify = 1;
+    opt.motion_range = 0;
+    err[0] = '\0';
+    if (expect_ok(encode_mem(&mem, &opt, path, RATE, err, sizeof(err)), err,
+                  "verify audio") != 0)
+        goto done;
+
+    memset(&source, 0, sizeof(source));
+    source.user = &mem;
+    source.width = W;
+    source.height = H;
+    source.frame_count = VIDEO_FRAMES;
+    source.fps_num = 15;
+    source.fps_den = 1;
+    source.read_frame = mem_read_frame;
+    source.read_audio = mem_read_audio;
+    source.audio_track_count = 1;
+    source.audio[0].rate = RATE;
+    source.audio[0].channels = 1;
+    source.audio[0].bits = 16;
+    source.audio[0].sample_count = SAMPLES;
+    if (bink_enc_verify(path, &source, &opt, err, sizeof(err)) != BINK_ENC_OK) {
+        fprintf(stderr, "FAIL verify audio: matching source rejected: %s\n",
+                err);
+        goto done;
+    }
+    mem.pcm = flipped;
+    err[0] = '\0';
+    if (bink_enc_verify(path, &source, &opt, err, sizeof(err)) !=
+            BINK_ENC_ERR_VERIFY ||
+        strstr(err, "audio track 0") == NULL) {
+        fprintf(stderr, "FAIL verify audio: flipped source accepted (%s)\n",
+                err);
+        goto done;
+    }
+    rc = 0;
+done:
+    remove(path);
+    free(frames);
+    free(pcm);
+    free(flipped);
+    return rc;
+}
+
 /* A short video clip carrying a sine (or two, for stereo). */
 typedef struct {
     uint8_t *frames;
@@ -2392,6 +2481,39 @@ static int test_image_and_wav_load(void)
     free(audio.pcm);
     remove(path);
 
+    /* Chunk sizes larger than the file must end the scan (a 32-bit long
+     * used to wrap and re-read the chunk forever) and must not be trusted
+     * as an allocation size. */
+    {
+        unsigned char bogus[20];
+        FILE *fp;
+
+        memcpy(bogus, "RIFF", 4);
+        put_u32(bogus + 4, 12);
+        memcpy(bogus + 8, "WAVE", 4);
+        memcpy(bogus + 12, "junk", 4);
+        put_u32(bogus + 16, 0xfffffff8u);
+        path_for(path, sizeof(path), "bogus.wav");
+        fp = fopen(path, "wb");
+        CHECK(fp != NULL);
+        CHECK(fwrite(bogus, 1, sizeof(bogus), fp) == sizeof(bogus));
+        fclose(fp);
+        memset(&audio, 0, sizeof(audio));
+        CHECK(bink_enc_wav_load(path, &audio, err, sizeof(err)) ==
+              BINK_ENC_ERR_INPUT);
+        CHECK(strstr(err, "missing fmt or data") != NULL);
+
+        memcpy(bogus + 12, "data", 4);
+        fp = fopen(path, "wb");
+        CHECK(fp != NULL);
+        CHECK(fwrite(bogus, 1, sizeof(bogus), fp) == sizeof(bogus));
+        fclose(fp);
+        CHECK(bink_enc_wav_load(path, &audio, err, sizeof(err)) ==
+              BINK_ENC_ERR_INPUT);
+        CHECK(strstr(err, "truncated WAV data") != NULL);
+        remove(path);
+    }
+
     {
         /* 2x2 RGB PNG: (10,20,30) (40,50,60) / (70,80,90) (100,110,120). */
         static const unsigned char png2x2[] = {
@@ -2690,6 +2812,8 @@ int main(void)
     if (test_audio() != 0)
         return 1;
     if (test_audio_sine_frequency() != 0)
+        return 1;
+    if (test_verify_checks_audio_samples() != 0)
         return 1;
     if (test_audio_sine_snr() != 0)
         return 1;

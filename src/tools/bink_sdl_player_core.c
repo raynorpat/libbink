@@ -307,7 +307,8 @@ int bink_player_run(int argc, char **argv,
         SDL_Event event;
         double now;
         int advanced = 0;
-        long seek_target = -1;
+        int want_seek = 0;
+        long seek_target = 0;
 
         while (SDL_PollEvent(&event)) {
             int key;
@@ -334,8 +335,10 @@ int bink_player_run(int argc, char **argv,
                 step = (unsigned long)(1000000.0 / usf + 0.5);
                 if (step < 1)
                     step = 1;
+                /* May be negative near the start; it is clamped below. */
                 seek_target = (long)cur_frame +
                               (key == SDLK_LEFT ? -(long)step : (long)step);
+                want_seek = 1;
             }
         }
         if (quit)
@@ -343,12 +346,12 @@ int bink_player_run(int argc, char **argv,
 
         if (test_seek >= 0) {
             seek_target = test_seek;
+            want_seek = 1;
             test_seek = -1;
         }
-        if (seek_target >= 0) {
+        if (want_seek) {
             long target = seek_target;
 
-            seek_target = -1;
             if (target < 0)
                 target = 0;
             if (frames > 0 && target >= (long)frames)
@@ -364,8 +367,8 @@ int bink_player_run(int argc, char **argv,
                 if (status == BINK_MORE) {
                     char next_status = bink_next(b);
 
+                    status = next_status;
                     if (next_status == BINK_MORE || next_status == BINK_LAST) {
-                        status = next_status;
                         upload_slot(renderer, backend, b, cur ^ 1, w, h);
                         has_next = 1;
                         if (backend->upload_motion(renderer, b, &blocks_w,
@@ -444,6 +447,13 @@ int bink_player_run(int argc, char **argv,
         if (!has_next && status == BINK_LAST &&
             now - start_ms >= frame_ms)
             break;
+        /* A frame that failed to decode ends playback: there is nothing
+         * further to show, and waiting would hold the window open forever. */
+        if (!has_next && status != BINK_MORE && status != BINK_LAST) {
+            fprintf(stderr, "Decoding failed; stopping.\n");
+            exit_code = 1;
+            break;
+        }
 
         if (advanced) {
             start_ms += frame_ms;

@@ -94,6 +94,26 @@ static int frame0_end(const unsigned char *data, unsigned long size,
     return 0;
 }
 
+/* One hash over the visible Y, U and V pixels of the current frame. */
+static int hash_planes(bink b, unsigned long width, unsigned long height,
+                       uint64_t *out)
+{
+    uint64_t hash = 0;
+    int plane;
+
+    for (plane = BINK_PLANE_Y; plane <= BINK_PLANE_V; plane++) {
+        const unsigned char *p = bink_get_plane(b, plane);
+        int w = plane == BINK_PLANE_Y ? (int)width : (int)((width + 1) / 2);
+        int h = plane == BINK_PLANE_Y ? (int)height : (int)((height + 1) / 2);
+
+        if (p == NULL)
+            return -1;
+        hash = hash * FNV_PRIME + fnv1a_rows(p, w, h, bink_get_stride(b, plane));
+    }
+    *out = hash;
+    return 0;
+}
+
 static int test_truncated_media(void)
 {
     const char *dir = test_media_dir();
@@ -102,6 +122,10 @@ static int test_truncated_media(void)
     unsigned long size = 0;
     unsigned long end = 0;
     unsigned long trunc;
+    unsigned long width = 0;
+    unsigned long height = 0;
+    unsigned long decoded = 0;
+    uint64_t good = 0;
     char status;
     FILE *file;
     bink b;
@@ -125,20 +149,54 @@ static int test_truncated_media(void)
     CHECK(end + 10 < size);
     trunc = end + 10;
 
-    /*
-     * A short buffer may be rejected while opening, or opened and then
-     * fail on the first frame that runs past the buffer. Either is safe.
-     */
+    /* The untouched header describes a longer file, so opening the short
+     * buffer is refused outright. */
+    b = bink_open_memory(data, trunc);
+    CHECK(b == NULL);
+
+    /* Now cut inside frame 1's video: skip its audio packets and keep 64
+     * bytes of picture, so the frame fails part-way through decoding. */
+    {
+        unsigned long tracks = r32(data + 40);
+        unsigned long pos = end;
+        unsigned long i;
+
+        for (i = 0; i < tracks; i++) {
+            CHECK(pos + 4 < size);
+            pos += 4 + r32(data + pos);
+        }
+        trunc = pos + 64;
+        CHECK(trunc < size);
+    }
+
+    /* Describe a two-frame file that ends there: frame 0 decodes and
+     * frame 1 runs out of data. */
+    w32(data + 4, trunc - 8);
+    w32(data + 8, 2);
+    w32(data + 12, trunc);
     b = bink_open_memory(data, trunc);
     free(data);
-    if (b == NULL)
-        return 0;
+    CHECK(b != NULL);
 
     CHECK(bink_enable_video(b, 1) == 0);
+    CHECK(bink_info_video(b, &width, &height, NULL) == 0);
     status = bink_first(b);
-    while (status == BINK_MORE || status == BINK_LAST)
+    while (status == BINK_MORE || status == BINK_LAST) {
+        CHECK(hash_planes(b, width, height, &good) == 0);
+        decoded++;
         status = bink_next(b);
+    }
     CHECK(status == BINK_ERROR);
+    /* A failed frame must not disturb the last one that decoded: the
+     * planes still hold it, and so does the RGB view. */
+    CHECK(decoded == 1);
+    {
+        uint64_t after = 0;
+
+        CHECK(hash_planes(b, width, height, &after) == 0);
+        CHECK(after == good);
+        CHECK(bink_get_video(b) != NULL);
+    }
     bink_close(b);
     return 0;
 }

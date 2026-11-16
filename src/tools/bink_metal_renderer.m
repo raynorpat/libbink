@@ -184,6 +184,10 @@ BinkRenderer *bink_metal_renderer_create(void *window, unsigned long w,
     finterp = [library newFunctionWithName:@"finterp"];
     if (vfn == nil || fpresent == nil || finterp == nil) {
         fprintf(stderr, "Metal shader functions are missing.\n");
+        [vfn release];
+        [fpresent release];
+        [finterp release];
+        [library release];
         bink_metal_renderer_destroy(r);
         return NULL;
     }
@@ -197,6 +201,13 @@ BinkRenderer *bink_metal_renderer_create(void *window, unsigned long w,
     descriptor.fragmentFunction = finterp;
     r->pipeline_interp =
         [r->device newRenderPipelineStateWithDescriptor:descriptor error:&error];
+    /* This file is built without ARC. The pipelines hold what they need,
+     * so the objects that built them are released here on every path. */
+    [descriptor release];
+    [vfn release];
+    [fpresent release];
+    [finterp release];
+    [library release];
     if (r->pipeline_present == nil || r->pipeline_interp == nil) {
         fprintf(stderr, "Cannot create the Metal pipelines: %s\n",
                 error != nil ? [[error localizedDescription] UTF8String]

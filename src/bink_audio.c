@@ -59,7 +59,10 @@ struct BinkAudio {
     float quant_table[96];
     float *previous;
     float *block;
+    /* Grown on demand up to max_bytes: the header's figure is only a cap,
+     * so a hostile file cannot make the decoder reserve it up front. */
     unsigned char *pcm;
+    unsigned long pcm_cap;
     unsigned long pcm_bytes;
     double *fft_re;
     double *fft_im;
@@ -274,8 +277,11 @@ static int read_bits(BinkBits *bits, int count, int *err)
     if (*err)
         return 0;
     value = bink_bits_read(bits, count);
-    if (value < 0)
+    if (value < 0) {
+        /* Callers index tables with the result, so never hand back -1. */
         *err = 1;
+        return 0;
+    }
     return value;
 }
 
@@ -392,10 +398,9 @@ int bink_audio_create(BinkAudio **out, unsigned long rate, int channels,
         (size_t)audio->channels * (size_t)audio->overlap_len, sizeof(float));
     audio->block = (float *)calloc(
         (size_t)audio->channels * (size_t)audio->frame_len, sizeof(float));
-    audio->pcm = (unsigned char *)malloc(max_bytes ? (size_t)max_bytes : 1);
     audio->fft_re = (double *)malloc((size_t)audio->frame_len * sizeof(double));
     audio->fft_im = (double *)malloc((size_t)audio->frame_len * sizeof(double));
-    if (audio->previous == NULL || audio->block == NULL || audio->pcm == NULL ||
+    if (audio->previous == NULL || audio->block == NULL ||
         audio->fft_re == NULL || audio->fft_im == NULL) {
         bink_audio_destroy(audio);
         return -1;
@@ -527,6 +532,32 @@ static int decode_dct_block(BinkAudio *audio, BinkBits *bits, int16_t *dst,
     return 0;
 }
 
+/* Make room for `need` bytes of PCM, never beyond max_bytes. */
+static int pcm_reserve(BinkAudio *audio, unsigned long need)
+{
+    unsigned long cap;
+    unsigned char *grown;
+
+    if (need > audio->max_bytes)
+        return -1;
+    if (need <= audio->pcm_cap)
+        return 0;
+    cap = audio->pcm_cap != 0 ? audio->pcm_cap : need;
+    while (cap < need) {
+        if (cap > audio->max_bytes / 2) {
+            cap = audio->max_bytes;
+            break;
+        }
+        cap *= 2;
+    }
+    grown = (unsigned char *)realloc(audio->pcm, (size_t)cap);
+    if (grown == NULL)
+        return -1;
+    audio->pcm = grown;
+    audio->pcm_cap = cap;
+    return 0;
+}
+
 int bink_audio_decode(BinkAudio *audio, const unsigned char *data,
                       unsigned long size)
 {
@@ -563,7 +594,8 @@ int bink_audio_decode(BinkAudio *audio, const unsigned char *data,
     block_bytes = (audio->frame_len - audio->overlap_len) * audio->channels *
                   (int)sizeof(int16_t);
     while (!err && bink_bits_left(&bits) > 0) {
-        if (produced + (unsigned long)block_bytes > audio->max_bytes) {
+        if ((unsigned long)block_bytes > audio->max_bytes - produced ||
+            pcm_reserve(audio, produced + (unsigned long)block_bytes) != 0) {
             err = 1;
             break;
         }

@@ -27,6 +27,7 @@ bink_enc_status bink_enc_wav_load(const char *path, bink_pcm_audio *audio,
 {
     FILE *fp;
     unsigned char header[12];
+    long file_len;
     unsigned rate = 0;
     unsigned channels = 0;
     unsigned bits = 0;
@@ -43,6 +44,11 @@ bink_enc_status bink_enc_wav_load(const char *path, bink_pcm_audio *audio,
     fp = fopen(path, "rb");
     if (fp == NULL)
         return fail(err, errlen, "cannot open WAV");
+    if (fseek(fp, 0, SEEK_END) != 0 || (file_len = ftell(fp)) < 0 ||
+        fseek(fp, 0, SEEK_SET) != 0) {
+        fclose(fp);
+        return fail(err, errlen, "cannot read WAV");
+    }
     if (fread(header, 1, 12, fp) != 12 || memcmp(header, "RIFF", 4) != 0 ||
         memcmp(header + 8, "WAVE", 4) != 0) {
         fclose(fp);
@@ -52,12 +58,27 @@ bink_enc_status bink_enc_wav_load(const char *path, bink_pcm_audio *audio,
     for (;;) {
         unsigned char chunk[8];
         unsigned size;
+        long body;
         long next;
 
         if (fread(chunk, 1, 8, fp) != 8)
             break;
         size = read_u32(chunk + 4);
-        next = ftell(fp) + (long)size + (size & 1u);
+        body = ftell(fp);
+        if (body < 0 || body > file_len)
+            break;
+        /* A chunk that claims more than the file holds would wrap a 32-bit
+         * long and seek backwards, re-reading the same chunk forever. */
+        if ((unsigned long)size > (unsigned long)(file_len - body)) {
+            if (memcmp(chunk, "data", 4) == 0 && data == NULL) {
+                fclose(fp);
+                return fail(err, errlen, "truncated WAV data");
+            }
+            break;
+        }
+        next = body + (long)size;
+        if ((size & 1u) && next < file_len)
+            next++;
         if (memcmp(chunk, "fmt ", 4) == 0) {
             unsigned char fmt[16];
 

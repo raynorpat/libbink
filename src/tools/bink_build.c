@@ -46,7 +46,7 @@ static void usage(FILE *out, const char *program)
         "      --fps N[/D]         frame rate (default 15)\n"
         "      --keyframe-interval N  frames between keyframes (default 150, 0 = frame 0 only)\n"
         "      --motion-range N    motion search radius 0..15 (default 8)\n"
-        "      --verify            decode the result and compare YUV planes\n"
+        "      --verify            decode the result and compare YUV planes and audio\n"
         "      --verbose           print progress\n"
         "      --quiet             suppress progress messages\n"
         "  -h, --help              show this help\n"

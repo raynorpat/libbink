@@ -10,6 +10,16 @@
 
 static int16_t *mix_pcm = NULL;
 static unsigned long mix_cap = 0;
+/* Per-track resampling phase carried from one frame's packet to the next. */
+static double mix_phase[7];
+
+static void reset_phase(void)
+{
+    int i;
+
+    for (i = 0; i < 7; i++)
+        mix_phase[i] = 0.0;
+}
 
 /* Mix the current frame into mix_pcm. Returns the byte count. A NULL
    total_bytes skips the test counter. */
@@ -20,6 +30,7 @@ static unsigned long mix_current(bink object, const int enabled[7],
                                  unsigned long *total_bytes)
 {
     BinkMixTrack tracks[7];
+    int source[7];
     unsigned long frames_out = 0;
     unsigned long samples_out;
     int count = 0;
@@ -45,11 +56,11 @@ static unsigned long mix_current(bink object, const int enabled[7],
         tracks[count].samples = samples;
         tracks[count].rate = track_rates[i];
         tracks[count].channels = track_channels[i];
+        tracks[count].phase = mix_phase[i];
+        source[count] = i;
         if (samples > 0 && track_rates[i] > 0 && audio->rate > 0) {
             unsigned long converted =
-                (unsigned long)(((unsigned long long)samples *
-                                 (unsigned long long)audio->rate) /
-                                track_rates[i]);
+                bink_mix_frames(&tracks[count], (unsigned long)audio->rate);
 
             if (converted > frames_out)
                 frames_out = converted;
@@ -72,6 +83,11 @@ static unsigned long mix_current(bink object, const int enabled[7],
     if (bink_mix(tracks, count, (unsigned long)audio->rate, audio->channels,
                  mix_pcm, frames_out) != 0)
         return 0;
+    for (i = 0; i < count; i++) {
+        if (tracks[i].samples > 0)
+            mix_phase[source[i]] =
+                bink_mix_next_phase(&tracks[i], (unsigned long)audio->rate);
+    }
     return samples_out * sizeof(int16_t);
 }
 
@@ -130,6 +146,7 @@ int bink_playback_seek(bink object, unsigned long target, char *status,
     unsigned long cap = 0;
 
     bink_playback_audio_clear(audio);
+    reset_phase();
     if (bink_seek_keyframe(object, target) != 0)
         return -1;
     if (bink_info_all(object, &cur, &frames, NULL) != 0)
@@ -197,4 +214,5 @@ void bink_playback_shutdown(void)
     free(mix_pcm);
     mix_pcm = NULL;
     mix_cap = 0;
+    reset_phase();
 }

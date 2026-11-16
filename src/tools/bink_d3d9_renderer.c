@@ -110,24 +110,28 @@ static IDirect3DTexture9 *make_texture(BinkD3DRenderer *r, D3DFORMAT format,
     return texture;
 }
 
+/* Copy h rows of w texels, bytes_per_texel wide, into the texture. The
+ * source advances by `stride` and the destination by the driver's pitch,
+ * which need not equal either the stride or the row size. */
 static int upload_rows(IDirect3DTexture9 *texture, const unsigned char *data,
-                       unsigned long w, unsigned long h, int stride)
+                       unsigned long w, unsigned long h, int stride,
+                       unsigned bytes_per_texel)
 {
     D3DLOCKED_RECT locked;
+    size_t row_bytes = (size_t)w * bytes_per_texel;
+    unsigned long y;
 
     if (texture == NULL || data == NULL)
         return -1;
     if (FAILED(texture->lpVtbl->LockRect(texture, 0, &locked, NULL, 0)))
         return -1;
-    if (stride == (int)w) {
-        memcpy(locked.pBits, data, (size_t)w * (size_t)h);
-    } else {
-        unsigned long y;
-
-        for (y = 0; y < h; y++)
-            memcpy((unsigned char *)locked.pBits + (size_t)y * (size_t)locked.Pitch,
-                   data + (size_t)y * (size_t)stride, w);
+    if (locked.Pitch < 0 || (size_t)locked.Pitch < row_bytes) {
+        texture->lpVtbl->UnlockRect(texture, 0);
+        return -1;
     }
+    for (y = 0; y < h; y++)
+        memcpy((unsigned char *)locked.pBits + (size_t)y * (size_t)locked.Pitch,
+               data + (size_t)y * (size_t)stride, row_bytes);
     texture->lpVtbl->UnlockRect(texture, 0);
     return 0;
 }
@@ -256,16 +260,18 @@ int bink_d3d_renderer_upload(BinkD3DRenderer *r, bink object, int slot)
     cw = (r->w + 1) / 2;
     ch = (r->h + 1) / 2;
     if (upload_rows(r->planes[slot][0], y, r->w, r->h,
-                    bink_get_stride(object, BINK_PLANE_Y)) != 0 ||
+                    bink_get_stride(object, BINK_PLANE_Y), 1) != 0 ||
         upload_rows(r->planes[slot][1], u, cw, ch,
-                    bink_get_stride(object, BINK_PLANE_U)) != 0 ||
+                    bink_get_stride(object, BINK_PLANE_U), 1) != 0 ||
         upload_rows(r->planes[slot][2], v, cw, ch,
-                    bink_get_stride(object, BINK_PLANE_V)) != 0)
+                    bink_get_stride(object, BINK_PLANE_V), 1) != 0)
         return -1;
     return 0;
 }
 
-int bink_d3d_renderer_upload_motion(BinkD3DRenderer *r, bink object)
+int bink_d3d_renderer_upload_motion(BinkD3DRenderer *r, bink object,
+                                    unsigned long *blocks_w,
+                                    unsigned long *blocks_h)
 {
     const signed char *mx = NULL;
     const signed char *my = NULL;
@@ -275,6 +281,10 @@ int bink_d3d_renderer_upload_motion(BinkD3DRenderer *r, bink object)
     unsigned long i;
     int rc;
 
+    if (blocks_w != NULL)
+        *blocks_w = 0;
+    if (blocks_h != NULL)
+        *blocks_h = 0;
     if (r == NULL)
         return -1;
     if (!bink_get_motion(object, &bw, &bh, &mx, &my) || bw == 0 || bh == 0)
@@ -287,8 +297,14 @@ int bink_d3d_renderer_upload_motion(BinkD3DRenderer *r, bink object)
         texels[i * 2u] = (unsigned char)((int)mx[i] + 128);
         texels[i * 2u + 1u] = (unsigned char)((int)my[i] + 128);
     }
-    rc = upload_rows(r->motion, texels, bw, bh, (int)(bw * 2u));
+    rc = upload_rows(r->motion, texels, bw, bh, (int)(bw * 2u), 2);
     free(texels);
+    if (rc == 0) {
+        if (blocks_w != NULL)
+            *blocks_w = bw;
+        if (blocks_h != NULL)
+            *blocks_h = bh;
+    }
     return rc;
 }
 

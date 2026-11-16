@@ -20,6 +20,57 @@ static int test_upsample(void)
     return 0;
 }
 
+/* A ramp split into two-sample packets and resampled 3000 -> 4000 Hz.
+   Carrying the phase keeps the second packet on the ramp (675) instead of
+   restarting at its first sample (600), and three packets of two samples
+   come out as exactly eight frames. */
+static int test_phase_carries_across_packets(void)
+{
+    static const int16_t first[] = {0, 300};
+    static const int16_t second[] = {600, 900};
+    static const int16_t third[] = {1200, 1500};
+    int16_t out[4];
+    BinkMixTrack track;
+    unsigned long frames;
+    unsigned long total = 0;
+
+    memset(&track, 0, sizeof(track));
+    track.samples = 2;
+    track.rate = 3000;
+    track.channels = 1;
+
+    track.pcm = first;
+    frames = bink_mix_frames(&track, 4000);
+    CHECK(frames == 3);
+    CHECK(bink_mix(&track, 1, 4000, 1, out, frames) == 0);
+    CHECK(out[0] == 0);
+    CHECK(out[1] == 225);
+    total += frames;
+    track.phase = bink_mix_next_phase(&track, 4000);
+    CHECK(track.phase > 0.249 && track.phase < 0.251);
+
+    track.pcm = second;
+    frames = bink_mix_frames(&track, 4000);
+    CHECK(frames == 3);
+    CHECK(bink_mix(&track, 1, 4000, 1, out, frames) == 0);
+    CHECK(out[0] == 675);
+    CHECK(out[1] == 900);
+    total += frames;
+    track.phase = bink_mix_next_phase(&track, 4000);
+    CHECK(track.phase > 0.499 && track.phase < 0.501);
+
+    track.pcm = third;
+    frames = bink_mix_frames(&track, 4000);
+    CHECK(frames == 2);
+    CHECK(bink_mix(&track, 1, 4000, 1, out, frames) == 0);
+    CHECK(out[0] == 1350);
+    total += frames;
+    CHECK(total == 8);
+    track.phase = bink_mix_next_phase(&track, 4000);
+    CHECK(track.phase < 0.001);
+    return 0;
+}
+
 static int test_mono_to_stereo(void)
 {
     static const int16_t in[] = {1000};
@@ -177,6 +228,8 @@ static int test_reject(void)
 int main(void)
 {
     if (test_upsample() != 0)
+        return 1;
+    if (test_phase_carries_across_packets() != 0)
         return 1;
     if (test_mono_to_stereo() != 0)
         return 1;

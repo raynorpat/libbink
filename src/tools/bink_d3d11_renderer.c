@@ -28,8 +28,6 @@ struct BinkD3DRenderer {
     ID3D11ShaderResourceView *motion;
     unsigned long w;
     unsigned long h;
-    unsigned char *scratch;
-    size_t scratch_cap;
 };
 
 typedef struct {
@@ -154,39 +152,21 @@ static ID3D11ShaderResourceView *make_view(BinkD3DRenderer *r,
     return view;
 }
 
+/* Replace the whole texture from rows `stride` bytes apart. The stride is
+ * the source row pitch, so padded decoder planes and tightly packed
+ * two-byte motion texels both upload without an intermediate copy. */
 static int upload_rows(BinkD3DRenderer *r, ID3D11ShaderResourceView *view,
-                       const unsigned char *data, unsigned long w,
-                       unsigned long h, int stride)
+                       const unsigned char *data, int stride)
 {
     ID3D11Resource *resource = NULL;
 
-    if (view == NULL || data == NULL)
+    if (view == NULL || data == NULL || stride <= 0)
         return -1;
     view->lpVtbl->GetResource(view, &resource);
-    if (stride == (int)w) {
-        r->context->lpVtbl->UpdateSubresource(r->context, resource, 0, NULL,
-                                              data, w, 0);
-    } else {
-        size_t need = (size_t)w * (size_t)h;
-        unsigned long y;
-
-        if (need > r->scratch_cap) {
-            unsigned char *grown =
-                (unsigned char *)realloc(r->scratch, need);
-
-            if (grown == NULL) {
-                resource->lpVtbl->Release(resource);
-                return -1;
-            }
-            r->scratch = grown;
-            r->scratch_cap = need;
-        }
-        for (y = 0; y < h; y++)
-            memcpy(r->scratch + (size_t)y * w,
-                   data + (size_t)y * (size_t)stride, w);
-        r->context->lpVtbl->UpdateSubresource(r->context, resource, 0, NULL,
-                                              r->scratch, w, 0);
-    }
+    if (resource == NULL)
+        return -1;
+    r->context->lpVtbl->UpdateSubresource(r->context, resource, 0, NULL, data,
+                                          (UINT)stride, 0);
     resource->lpVtbl->Release(resource);
     return 0;
 }
@@ -426,8 +406,6 @@ int bink_d3d_renderer_upload(BinkD3DRenderer *r, bink object, int slot)
     const unsigned char *y;
     const unsigned char *u;
     const unsigned char *v;
-    unsigned long cw;
-    unsigned long ch;
 
     if (r == NULL || slot < 0 || slot > 1)
         return -1;
@@ -436,19 +414,19 @@ int bink_d3d_renderer_upload(BinkD3DRenderer *r, bink object, int slot)
     v = bink_get_plane(object, BINK_PLANE_V);
     if (y == NULL || u == NULL || v == NULL)
         return -1;
-    cw = (r->w + 1) / 2;
-    ch = (r->h + 1) / 2;
-    if (upload_rows(r, r->planes[slot][0], y, r->w, r->h,
+    if (upload_rows(r, r->planes[slot][0], y,
                     bink_get_stride(object, BINK_PLANE_Y)) != 0 ||
-        upload_rows(r, r->planes[slot][1], u, cw, ch,
+        upload_rows(r, r->planes[slot][1], u,
                     bink_get_stride(object, BINK_PLANE_U)) != 0 ||
-        upload_rows(r, r->planes[slot][2], v, cw, ch,
+        upload_rows(r, r->planes[slot][2], v,
                     bink_get_stride(object, BINK_PLANE_V)) != 0)
         return -1;
     return 0;
 }
 
-int bink_d3d_renderer_upload_motion(BinkD3DRenderer *r, bink object)
+int bink_d3d_renderer_upload_motion(BinkD3DRenderer *r, bink object,
+                                    unsigned long *blocks_w,
+                                    unsigned long *blocks_h)
 {
     const signed char *mx = NULL;
     const signed char *my = NULL;
@@ -457,6 +435,10 @@ int bink_d3d_renderer_upload_motion(BinkD3DRenderer *r, bink object)
     unsigned char *texels;
     unsigned long i;
 
+    if (blocks_w != NULL)
+        *blocks_w = 0;
+    if (blocks_h != NULL)
+        *blocks_h = 0;
     if (r == NULL)
         return -1;
     if (!bink_get_motion(object, &bw, &bh, &mx, &my) || bw == 0 || bh == 0)
@@ -469,9 +451,15 @@ int bink_d3d_renderer_upload_motion(BinkD3DRenderer *r, bink object)
         texels[i * 2u + 1u] = (unsigned char)((int)my[i] + 128);
     }
     {
-        int rc = upload_rows(r, r->motion, texels, bw, bh, (int)(bw * 2u));
+        int rc = upload_rows(r, r->motion, texels, (int)(bw * 2u));
 
         free(texels);
+        if (rc == 0) {
+            if (blocks_w != NULL)
+                *blocks_w = bw;
+            if (blocks_h != NULL)
+                *blocks_h = bh;
+        }
         return rc;
     }
 }
@@ -595,6 +583,5 @@ void bink_d3d_renderer_destroy(BinkD3DRenderer *r)
         r->context->lpVtbl->Release(r->context);
     if (r->device != NULL)
         r->device->lpVtbl->Release(r->device);
-    free(r->scratch);
     free(r);
 }

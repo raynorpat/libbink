@@ -26,8 +26,12 @@ BinkD3DRenderer *bink_d3d11_renderer_create(void *hwnd, unsigned long w,
 
 /* Upload the current frame's planes into slot (0 or 1). */
 int bink_d3d_renderer_upload(BinkD3DRenderer *r, bink object, int slot);
-/* Upload the current frame's motion field (+128 per byte). */
-int bink_d3d_renderer_upload_motion(BinkD3DRenderer *r, bink object);
+/* Upload the current frame's motion field (+128 per byte) and report its
+ * size in blocks, which the draw call needs to address it. Both are set to
+ * 0 when there is no field. */
+int bink_d3d_renderer_upload_motion(BinkD3DRenderer *r, bink object,
+                                    unsigned long *blocks_w,
+                                    unsigned long *blocks_h);
 int bink_d3d_renderer_draw(BinkD3DRenderer *r, const BinkD3DDraw *draw);
 void bink_d3d_renderer_destroy(BinkD3DRenderer *r);
 

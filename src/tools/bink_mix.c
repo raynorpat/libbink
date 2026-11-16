@@ -45,7 +45,8 @@ static int resample(const BinkMixTrack *track, unsigned long frame,
     int left;
     int right;
 
-    pos = (double)frame * (double)track->rate / (double)out_rate;
+    pos = track->phase +
+          (double)frame * (double)track->rate / (double)out_rate;
     if (pos >= (double)track->samples)
         return 0;
     if (track->samples == 1 || pos >= (double)(track->samples - 1))
@@ -61,6 +62,37 @@ static int resample(const BinkMixTrack *track, unsigned long frame,
 static int track_contributes(const BinkMixTrack *track)
 {
     return track->pcm != NULL && track->samples > 0;
+}
+
+unsigned long bink_mix_frames(const BinkMixTrack *track,
+                              unsigned long out_rate)
+{
+    double span;
+
+    if (track == NULL || track->rate == 0 || out_rate == 0 ||
+        track->samples == 0)
+        return 0;
+    span = (double)track->samples - track->phase;
+    if (span <= 0.0)
+        return 0;
+    return (unsigned long)ceil(span * (double)out_rate / (double)track->rate);
+}
+
+double bink_mix_next_phase(const BinkMixTrack *track, unsigned long out_rate)
+{
+    double step;
+    double next;
+
+    if (track == NULL || track->rate == 0 || out_rate == 0)
+        return 0.0;
+    step = (double)track->rate / (double)out_rate;
+    next = track->phase +
+           (double)bink_mix_frames(track, out_rate) * step -
+           (double)track->samples;
+    /* Rounding can leave it a hair outside one output step. */
+    if (next < 0.0 || next >= step)
+        return 0.0;
+    return next;
 }
 
 unsigned long bink_frame_bytes(unsigned long rate, int channels, double usf)

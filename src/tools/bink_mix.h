@@ -18,7 +18,18 @@ typedef struct {
     unsigned long samples; /* per channel */
     unsigned long rate;
     int channels;
+    /* Source position, in samples, of output frame 0. Zero starts at the
+       first sample; carry bink_mix_next_phase from one packet to the next
+       so a resampled track does not restart its phase at every packet. */
+    double phase;
 } BinkMixTrack;
+
+/* Output frames this track's samples cover at out_rate, from its phase. */
+unsigned long bink_mix_frames(const BinkMixTrack *track,
+                              unsigned long out_rate);
+
+/* Phase for the track's next packet after bink_mix_frames frames. */
+double bink_mix_next_phase(const BinkMixTrack *track, unsigned long out_rate);
 
 /* Write dst_frames frames of out_channels. Return 0, or -1 on a NULL
    destination or a zero rate. */

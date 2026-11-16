@@ -80,12 +80,12 @@ int bink_enc_audio_open(BinkEncAudio **out, const bink_enc_audio_info *info,
         video_samples = info->sample_count;
     video_samples += (uint64_t)audio->block_out;
     if (video_samples > (uint64_t)-1 / ((uint64_t)info->channels * 2)) {
-        free(audio);
+        bink_enc_audio_close(audio);
         return -1;
     }
     bytes = video_samples * info->channels * 2;
     if (bytes > 0xffffffffULL) {
-        free(audio);
+        bink_enc_audio_close(audio);
         return -1;
     }
     *max_decoded = (unsigned long)bytes;

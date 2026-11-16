@@ -65,6 +65,12 @@ struct BinkRenderer {
     VkFramebuffer capture_fb;
     VkBuffer readback;
     VkDeviceMemory readback_mem;
+    /* Upload staging, kept across frames and mapped for its lifetime. */
+    VkBuffer staging;
+    VkDeviceMemory staging_mem;
+    VkDeviceSize staging_cap;
+    void *staging_map;
+    VkCommandBuffer upload_cmd;
     unsigned long w;
     unsigned long h;
 };
@@ -257,118 +263,192 @@ static VkImageView make_view(BinkRenderer *r, VkImage image, VkFormat format)
     return view;
 }
 
-/* One-time command: upload pixels into a device-local image. */
-static int upload_image(BinkRenderer *r, VkImage image, const unsigned char *data,
-                        unsigned long w, unsigned long h, unsigned bytes_per_pixel)
+typedef struct {
+    VkImage image;
+    const unsigned char *data;
+    unsigned long w;
+    unsigned long h;
+    unsigned bytes_per_pixel;
+    int stride; /* bytes between source rows */
+} UploadRegion;
+
+#define BINK_VK_MAX_UPLOADS 4
+
+/* Grow the persistent staging buffer to at least `bytes`. Uploads are
+ * synchronous, so nothing is in flight when the old buffer is replaced. */
+static int staging_reserve(BinkRenderer *r, VkDeviceSize bytes)
 {
     VkBufferCreateInfo buffer_info;
     VkMemoryRequirements requirements;
     VkMemoryAllocateInfo allocate;
-    VkBuffer staging = VK_NULL_HANDLE;
-    VkDeviceMemory memory = VK_NULL_HANDLE;
-    VkCommandBuffer cmd;
-    VkCommandBufferAllocateInfo cmd_info;
-    VkCommandBufferBeginInfo begin;
-    VkBufferImageCopy copy;
-    VkSubmitInfo submit;
-    VkImageMemoryBarrier barrier;
-    void *mapped = NULL;
-    size_t bytes = (size_t)w * (size_t)h * bytes_per_pixel;
+    VkPhysicalDeviceMemoryProperties props;
+    uint32_t type = 0xffffffffu;
+    uint32_t i;
+
+    if (bytes <= r->staging_cap)
+        return 0;
+    if (r->staging_map != NULL) {
+        vkUnmapMemory(r->device, r->staging_mem);
+        r->staging_map = NULL;
+    }
+    if (r->staging != VK_NULL_HANDLE) {
+        vkDestroyBuffer(r->device, r->staging, NULL);
+        r->staging = VK_NULL_HANDLE;
+    }
+    if (r->staging_mem != VK_NULL_HANDLE) {
+        vkFreeMemory(r->device, r->staging_mem, NULL);
+        r->staging_mem = VK_NULL_HANDLE;
+    }
+    r->staging_cap = 0;
 
     memset(&buffer_info, 0, sizeof(buffer_info));
     buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     buffer_info.size = bytes;
     buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-    if (vkCreateBuffer(r->device, &buffer_info, NULL, &staging) != VK_SUCCESS)
+    if (vkCreateBuffer(r->device, &buffer_info, NULL, &r->staging) !=
+        VK_SUCCESS) {
+        r->staging = VK_NULL_HANDLE;
         return -1;
-    vkGetBufferMemoryRequirements(r->device, staging, &requirements);
-    {
-        VkPhysicalDeviceMemoryProperties props;
-        uint32_t i;
-        uint32_t type = 0xffffffffu;
-
-        vkGetPhysicalDeviceMemoryProperties(r->physical, &props);
-        for (i = 0; i < props.memoryTypeCount; i++) {
-            if ((requirements.memoryTypeBits & (1u << i)) &&
-                (props.memoryTypes[i].propertyFlags &
-                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) {
-                type = i;
-                break;
-            }
+    }
+    vkGetBufferMemoryRequirements(r->device, r->staging, &requirements);
+    vkGetPhysicalDeviceMemoryProperties(r->physical, &props);
+    for (i = 0; i < props.memoryTypeCount; i++) {
+        if ((requirements.memoryTypeBits & (1u << i)) &&
+            (props.memoryTypes[i].propertyFlags &
+             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) {
+            type = i;
+            break;
         }
-        if (type == 0xffffffffu) {
-            vkDestroyBuffer(r->device, staging, NULL);
+    }
+    if (type == 0xffffffffu)
+        return -1;
+    memset(&allocate, 0, sizeof(allocate));
+    allocate.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocate.allocationSize = requirements.size;
+    allocate.memoryTypeIndex = type;
+    if (vkAllocateMemory(r->device, &allocate, NULL, &r->staging_mem) !=
+        VK_SUCCESS) {
+        r->staging_mem = VK_NULL_HANDLE;
+        return -1;
+    }
+    if (vkBindBufferMemory(r->device, r->staging, r->staging_mem, 0) !=
+            VK_SUCCESS ||
+        vkMapMemory(r->device, r->staging_mem, 0, VK_WHOLE_SIZE, 0,
+                    &r->staging_map) != VK_SUCCESS ||
+        r->staging_map == NULL) {
+        r->staging_map = NULL;
+        return -1;
+    }
+    r->staging_cap = bytes;
+    return 0;
+}
+
+/* Copy every region into the staging buffer and upload them with one
+ * command buffer and one wait. Rows are packed tightly on the way in, so
+ * the decoder's padded strides need no intermediate copy. */
+static int upload_regions(BinkRenderer *r, const UploadRegion *regions,
+                          int count)
+{
+    VkDeviceSize offsets[BINK_VK_MAX_UPLOADS];
+    VkDeviceSize total = 0;
+    VkCommandBufferBeginInfo begin;
+    VkSubmitInfo submit;
+    VkMappedMemoryRange range;
+    int i;
+
+    if (count <= 0 || count > BINK_VK_MAX_UPLOADS)
+        return -1;
+    for (i = 0; i < count; i++) {
+        if (regions[i].data == NULL || regions[i].stride <= 0)
+            return -1;
+        /* Copy offsets must be multiples of four. */
+        total = (total + 3u) & ~(VkDeviceSize)3u;
+        offsets[i] = total;
+        total += (VkDeviceSize)regions[i].w * regions[i].h *
+                 regions[i].bytes_per_pixel;
+    }
+    if (staging_reserve(r, total) != 0)
+        return -1;
+    for (i = 0; i < count; i++) {
+        size_t row_bytes = (size_t)regions[i].w * regions[i].bytes_per_pixel;
+        unsigned char *dst = (unsigned char *)r->staging_map + offsets[i];
+        unsigned long row;
+
+        for (row = 0; row < regions[i].h; row++)
+            memcpy(dst + (size_t)row * row_bytes,
+                   regions[i].data + (size_t)row * (size_t)regions[i].stride,
+                   row_bytes);
+    }
+    memset(&range, 0, sizeof(range));
+    range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+    range.memory = r->staging_mem;
+    range.size = VK_WHOLE_SIZE;
+    vkFlushMappedMemoryRanges(r->device, 1, &range);
+
+    if (r->upload_cmd == VK_NULL_HANDLE) {
+        VkCommandBufferAllocateInfo cmd_info;
+
+        memset(&cmd_info, 0, sizeof(cmd_info));
+        cmd_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        cmd_info.commandPool = r->pool;
+        cmd_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cmd_info.commandBufferCount = 1;
+        if (vkAllocateCommandBuffers(r->device, &cmd_info, &r->upload_cmd) !=
+            VK_SUCCESS) {
+            r->upload_cmd = VK_NULL_HANDLE;
             return -1;
         }
-        memset(&allocate, 0, sizeof(allocate));
-        allocate.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        allocate.allocationSize = requirements.size;
-        allocate.memoryTypeIndex = type;
     }
-    if (vkAllocateMemory(r->device, &allocate, NULL, &memory) != VK_SUCCESS) {
-        vkDestroyBuffer(r->device, staging, NULL);
-        return -1;
-    }
-    vkBindBufferMemory(r->device, staging, memory, 0);
-    if (vkMapMemory(r->device, memory, 0, bytes, 0, &mapped) != VK_SUCCESS ||
-        mapped == NULL) {
-        vkFreeMemory(r->device, memory, NULL);
-        vkDestroyBuffer(r->device, staging, NULL);
-        return -1;
-    }
-    memcpy(mapped, data, bytes);
-    vkUnmapMemory(r->device, memory);
-
-    memset(&cmd_info, 0, sizeof(cmd_info));
-    cmd_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    cmd_info.commandPool = r->pool;
-    cmd_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    cmd_info.commandBufferCount = 1;
-    vkAllocateCommandBuffers(r->device, &cmd_info, &cmd);
+    /* The pool allows per-buffer reset, so beginning again resets it. */
     memset(&begin, 0, sizeof(begin));
     begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(cmd, &begin);
-    memset(&barrier, 0, sizeof(barrier));
-    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.image = image;
-    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    barrier.subresourceRange.levelCount = 1;
-    barrier.subresourceRange.layerCount = 1;
-    barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1,
-                         &barrier);
-    memset(&copy, 0, sizeof(copy));
-    copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    copy.imageSubresource.layerCount = 1;
-    copy.imageExtent.width = (uint32_t)w;
-    copy.imageExtent.height = (uint32_t)h;
-    copy.imageExtent.depth = 1;
-    vkCmdCopyBufferToImage(cmd, staging, image,
-                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
-    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0,
-                         NULL, 1, &barrier);
-    vkEndCommandBuffer(cmd);
+    if (vkBeginCommandBuffer(r->upload_cmd, &begin) != VK_SUCCESS)
+        return -1;
+    for (i = 0; i < count; i++) {
+        VkImageMemoryBarrier barrier;
+        VkBufferImageCopy copy;
+
+        memset(&barrier, 0, sizeof(barrier));
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image = regions[i].image;
+        barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        barrier.subresourceRange.levelCount = 1;
+        barrier.subresourceRange.layerCount = 1;
+        barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(r->upload_cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0,
+                             NULL, 1, &barrier);
+        memset(&copy, 0, sizeof(copy));
+        copy.bufferOffset = offsets[i];
+        copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        copy.imageSubresource.layerCount = 1;
+        copy.imageExtent.width = (uint32_t)regions[i].w;
+        copy.imageExtent.height = (uint32_t)regions[i].h;
+        copy.imageExtent.depth = 1;
+        vkCmdCopyBufferToImage(r->upload_cmd, r->staging, regions[i].image,
+                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+        barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(r->upload_cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL,
+                             0, NULL, 1, &barrier);
+    }
+    if (vkEndCommandBuffer(r->upload_cmd) != VK_SUCCESS)
+        return -1;
     memset(&submit, 0, sizeof(submit));
     submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submit.commandBufferCount = 1;
-    submit.pCommandBuffers = &cmd;
-    vkQueueSubmit(r->queue, 1, &submit, VK_NULL_HANDLE);
-    vkQueueWaitIdle(r->queue);
-    vkFreeCommandBuffers(r->device, r->pool, 1, &cmd);
-    vkDestroyBuffer(r->device, staging, NULL);
-    vkFreeMemory(r->device, memory, NULL);
-    return 0;
+    submit.pCommandBuffers = &r->upload_cmd;
+    if (vkQueueSubmit(r->queue, 1, &submit, VK_NULL_HANDLE) != VK_SUCCESS)
+        return -1;
+    return vkQueueWaitIdle(r->queue) == VK_SUCCESS ? 0 : -1;
 }
 
 static int create_swapchain(BinkRenderer *r)
@@ -1091,83 +1171,22 @@ fail:
 
 int bink_vulkan_renderer_upload(BinkRenderer *r, bink object, int slot)
 {
-    const unsigned char *y;
-    const unsigned char *u;
-    const unsigned char *v;
-    unsigned long cw;
-    unsigned long ch;
+    UploadRegion regions[3];
+    int plane;
 
     if (r == NULL || slot < 0 || slot > 1)
         return -1;
-    y = bink_get_plane(object, BINK_PLANE_Y);
-    u = bink_get_plane(object, BINK_PLANE_U);
-    v = bink_get_plane(object, BINK_PLANE_V);
-    if (y == NULL || u == NULL || v == NULL)
-        return -1;
-    cw = (r->w + 1) / 2;
-    ch = (r->h + 1) / 2;
-    /* The decoder's strides are 32-aligned, so copy tight rows first. */
-    {
-        unsigned char *tight = (unsigned char *)malloc((size_t)r->w * r->h);
-
-        if (tight == NULL)
+    for (plane = 0; plane < 3; plane++) {
+        regions[plane].image = r->planes[slot][plane];
+        regions[plane].data = bink_get_plane(object, plane);
+        regions[plane].w = plane == 0 ? r->w : (r->w + 1) / 2;
+        regions[plane].h = plane == 0 ? r->h : (r->h + 1) / 2;
+        regions[plane].bytes_per_pixel = 1;
+        regions[plane].stride = bink_get_stride(object, plane);
+        if (regions[plane].data == NULL)
             return -1;
-        {
-            unsigned long row;
-
-            for (row = 0; row < r->h; row++)
-                memcpy(tight + row * r->w,
-                       y + row * (unsigned long)bink_get_stride(object,
-                                                                BINK_PLANE_Y),
-                       r->w);
-        }
-        if (upload_image(r, r->planes[slot][0], tight, r->w, r->h, 1) != 0) {
-            free(tight);
-            return -1;
-        }
-        free(tight);
     }
-    {
-        unsigned char *tight = (unsigned char *)malloc((size_t)cw * ch);
-
-        if (tight == NULL)
-            return -1;
-        {
-            unsigned long row;
-
-            for (row = 0; row < ch; row++)
-                memcpy(tight + row * cw,
-                       u + row * (unsigned long)bink_get_stride(object,
-                                                                BINK_PLANE_U),
-                       cw);
-        }
-        if (upload_image(r, r->planes[slot][1], tight, cw, ch, 1) != 0) {
-            free(tight);
-            return -1;
-        }
-        free(tight);
-    }
-    {
-        unsigned char *tight = (unsigned char *)malloc((size_t)cw * ch);
-
-        if (tight == NULL)
-            return -1;
-        {
-            unsigned long row;
-
-            for (row = 0; row < ch; row++)
-                memcpy(tight + row * cw,
-                       v + row * (unsigned long)bink_get_stride(object,
-                                                                BINK_PLANE_V),
-                       cw);
-        }
-        if (upload_image(r, r->planes[slot][2], tight, cw, ch, 1) != 0) {
-            free(tight);
-            return -1;
-        }
-        free(tight);
-    }
-    return 0;
+    return upload_regions(r, regions, 3);
 }
 
 int bink_vulkan_renderer_upload_motion(BinkRenderer *r, bink object,
@@ -1195,10 +1214,22 @@ int bink_vulkan_renderer_upload_motion(BinkRenderer *r, bink object,
         texels[i * 2u] = (unsigned char)((int)mx[i] + 128);
         texels[i * 2u + 1u] = (unsigned char)((int)my[i] + 128);
     }
-    rc = upload_image(r, r->motion, texels, bw, bh, 2);
+    {
+        UploadRegion region;
+
+        region.image = r->motion;
+        region.data = texels;
+        region.w = bw;
+        region.h = bh;
+        region.bytes_per_pixel = 2;
+        region.stride = (int)(bw * 2u);
+        rc = upload_regions(r, &region, 1);
+    }
     free(texels);
-    *blocks_w = bw;
-    *blocks_h = bh;
+    if (rc == 0) {
+        *blocks_w = bw;
+        *blocks_h = bh;
+    }
     return rc;
 }
 
@@ -1261,8 +1292,12 @@ static void write_set(BinkRenderer *r, VkDescriptorSet set,
     vkUpdateDescriptorSets(r->device, (uint32_t)count, writes, 0, NULL);
 }
 
+/* `extent` is the size of the target: the swapchain's own extent, which on
+ * a high-DPI surface is larger than the video, or the video size for the
+ * capture image. */
 static void record(BinkRenderer *r, VkCommandBuffer cmd, VkFramebuffer fb,
-                   const BinkRenderParams *params, int image_index)
+                   const BinkRenderParams *params, int image_index,
+                   VkExtent2D extent)
 {
     VkCommandBufferBeginInfo begin;
     VkRenderPassBeginInfo pass;
@@ -1282,8 +1317,7 @@ static void record(BinkRenderer *r, VkCommandBuffer cmd, VkFramebuffer fb,
     pass.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
     pass.renderPass = r->render_pass;
     pass.framebuffer = fb;
-    pass.renderArea.extent.width = (uint32_t)r->w;
-    pass.renderArea.extent.height = (uint32_t)r->h;
+    pass.renderArea.extent = extent;
     pass.clearValueCount = 1;
     pass.pClearValues = &clear;
     vkCmdBeginRenderPass(cmd, &pass, VK_SUBPASS_CONTENTS_INLINE);
@@ -1292,15 +1326,14 @@ static void record(BinkRenderer *r, VkCommandBuffer cmd, VkFramebuffer fb,
                                                           : r->pipe_present);
     viewport.x = 0.0f;
     viewport.y = 0.0f;
-    viewport.width = (float)r->w;
-    viewport.height = (float)r->h;
+    viewport.width = (float)extent.width;
+    viewport.height = (float)extent.height;
     viewport.minDepth = 0.0f;
     viewport.maxDepth = 1.0f;
     vkCmdSetViewport(cmd, 0, 1, &viewport);
     scissor.offset.x = 0;
     scissor.offset.y = 0;
-    scissor.extent.width = (uint32_t)r->w;
-    scissor.extent.height = (uint32_t)r->h;
+    scissor.extent = extent;
     vkCmdSetScissor(cmd, 0, 1, &scissor);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                             r->pipeline_layout, 0, 1, &r->sets[image_index], 0,
@@ -1326,8 +1359,12 @@ int bink_vulkan_renderer_draw(BinkRenderer *r, const BinkRenderParams *params)
     vkResetFences(r->device, 1, &r->fence);
 
     if (params->capture) {
+        VkExtent2D video;
+
+        video.width = (uint32_t)r->w;
+        video.height = (uint32_t)r->h;
         write_set(r, r->sets[0], params);
-        record(r, r->cmds[0], r->capture_fb, params, 0);
+        record(r, r->cmds[0], r->capture_fb, params, 0, video);
         memset(&submit, 0, sizeof(submit));
         submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
         submit.commandBufferCount = 1;
@@ -1345,7 +1382,8 @@ int bink_vulkan_renderer_draw(BinkRenderer *r, const BinkRenderParams *params)
     if (index >= r->image_count)
         return -1;
     write_set(r, r->sets[index], params);
-    record(r, r->cmds[index], r->framebuffers[index], params, (int)index);
+    record(r, r->cmds[index], r->framebuffers[index], params, (int)index,
+           r->extent);
     {
         VkPipelineStageFlags wait = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
 
@@ -1474,6 +1512,12 @@ void bink_vulkan_renderer_destroy(BinkRenderer *r)
             vkDestroySemaphore(r->device, r->sem_available, NULL);
         if (r->fence != VK_NULL_HANDLE)
             vkDestroyFence(r->device, r->fence, NULL);
+        if (r->staging_map != NULL)
+            vkUnmapMemory(r->device, r->staging_mem);
+        if (r->staging != VK_NULL_HANDLE)
+            vkDestroyBuffer(r->device, r->staging, NULL);
+        if (r->staging_mem != VK_NULL_HANDLE)
+            vkFreeMemory(r->device, r->staging_mem, NULL);
         if (r->readback != VK_NULL_HANDLE)
             vkDestroyBuffer(r->device, r->readback, NULL);
         if (r->readback_mem != VK_NULL_HANDLE)

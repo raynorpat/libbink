@@ -219,7 +219,8 @@ int main(int argc, char **argv)
         if (status == BINK_MORE || status == BINK_LAST) {
             bink_d3d_renderer_upload(renderer, b, 1);
             has_next = 1;
-            if (bink_d3d_renderer_upload_motion(renderer, b) != 0) {
+            if (bink_d3d_renderer_upload_motion(renderer, b, &blocks_w,
+                                                &blocks_h) != 0) {
                 fprintf(stderr, "No motion field; interpolation off.\n");
                 interp = 0;
             }
@@ -294,13 +295,14 @@ int main(int argc, char **argv)
                         if (status == BINK_MORE) {
                             char next_status = bink_next(b);
 
+                            status = next_status;
                             if (next_status == BINK_MORE ||
                                 next_status == BINK_LAST) {
-                                status = next_status;
                                 bink_d3d_renderer_upload(renderer, b, cur ^ 1);
                                 has_next = 1;
-                                if (bink_d3d_renderer_upload_motion(renderer,
-                                                                    b) != 0) {
+                                if (bink_d3d_renderer_upload_motion(
+                                        renderer, b, &blocks_w,
+                                        &blocks_h) != 0) {
                                     fprintf(stderr,
                                             "No motion field; interpolation "
                                             "off.\n");
@@ -345,7 +347,9 @@ int main(int argc, char **argv)
                     if (status == BINK_MORE || status == BINK_LAST) {
                         bink_d3d_renderer_upload(renderer, b, cur ^ 1);
                         has_next = 1;
-                        if (bink_d3d_renderer_upload_motion(renderer, b) != 0) {
+                        if (bink_d3d_renderer_upload_motion(renderer, b,
+                                                            &blocks_w,
+                                                            &blocks_h) != 0) {
                             fprintf(stderr, "No motion field; interpolation "
                                             "off.\n");
                             interp = 0;
@@ -379,6 +383,13 @@ int main(int argc, char **argv)
         if (!has_next && status == BINK_LAST &&
             (double)(now - start_ms) >= frame_ms)
             break;
+        /* A frame that failed to decode ends playback: there is nothing
+         * further to show, and waiting would hold the window open forever. */
+        if (!has_next && status != BINK_MORE && status != BINK_LAST) {
+            fprintf(stderr, "Decoding failed; stopping.\n");
+            exit_code = 1;
+            break;
+        }
     }
 
 done:

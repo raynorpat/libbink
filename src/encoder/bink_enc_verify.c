@@ -14,6 +14,20 @@
 static const unsigned MAX_ERROR = 32;
 static const double MAX_RMSE = 5.0;
 
+/* Audio is lossy too. The decoded track's RMS error must stay within this
+ * fraction of the source's RMS level, with an absolute floor so near-silent
+ * input is not held to a relative bound. Sine sources measure about 0.4%;
+ * a swapped channel, a shifted block or a dropped packet lands near 100%. */
+static const double MAX_AUDIO_ERROR_RATIO = 0.25;
+static const double MAX_AUDIO_ERROR_FLOOR = 64.0;
+
+typedef struct {
+    size_t pos;      /* next source frame the decoder should produce */
+    double error;    /* sum of squared differences */
+    double signal;   /* sum of squared source samples */
+    double count;    /* samples compared */
+} AudioCheck;
+
 static bink_enc_status fail(char *err, size_t errlen, const char *message)
 {
     if (err != NULL && errlen > 0)
@@ -89,6 +103,56 @@ static int planes_within_tolerance(const bink movie, const uint8_t *y,
     return 1;
 }
 
+/* Compare one frame's decoded PCM for `track` with the source samples at
+ * the same position, treating anything past the source as silence. */
+static int accumulate_audio(const bink movie, const bink_enc_source *source,
+                            unsigned track, AudioCheck *check,
+                            int16_t **scratch, size_t *scratch_cap)
+{
+    const unsigned char *pcm = bink_get_audio(movie, (unsigned char)track);
+    unsigned long bytes = bink_get_audio_size(movie, (unsigned char)track);
+    size_t channels = source->audio[track].channels;
+    size_t total = source->audio[track].sample_count;
+    size_t frames;
+    size_t samples;
+    size_t i;
+
+    if (pcm == NULL || bytes == 0 || channels == 0)
+        return 0;
+    frames = (size_t)bytes / (channels * sizeof(int16_t));
+    samples = frames * channels;
+    if (samples > *scratch_cap) {
+        int16_t *grown =
+            (int16_t *)realloc(*scratch, samples * sizeof(int16_t));
+
+        if (grown == NULL)
+            return -1;
+        *scratch = grown;
+        *scratch_cap = samples;
+    }
+    memset(*scratch, 0, samples * sizeof(int16_t));
+    if (check->pos < total && source->read_audio != NULL) {
+        size_t want = total - check->pos;
+
+        if (want > frames)
+            want = frames;
+        source->read_audio(source->user, track, check->pos, want, *scratch);
+    }
+    for (i = 0; i < samples; i++) {
+        int16_t got;
+        double expect = (double)(*scratch)[i];
+        double diff;
+
+        memcpy(&got, pcm + i * sizeof(int16_t), sizeof(got));
+        diff = (double)got - expect;
+        check->error += diff * diff;
+        check->signal += expect * expect;
+    }
+    check->count += (double)samples;
+    check->pos += frames;
+    return 0;
+}
+
 bink_enc_status bink_enc_verify(const char *path, const bink_enc_source *source,
                                 const bink_enc_options *options,
                                 char *err, size_t errlen)
@@ -106,6 +170,9 @@ bink_enc_status bink_enc_verify(const char *path, const bink_enc_source *source,
     uint8_t *u = NULL;
     uint8_t *v = NULL;
     BinkEncAudio *audio[BINK_ENC_MAX_AUDIO_TRACKS];
+    AudioCheck checks[BINK_ENC_MAX_AUDIO_TRACKS];
+    int16_t *scratch = NULL;
+    size_t scratch_cap = 0;
     unsigned track;
     char status;
     bink_enc_status result = BINK_ENC_OK;
@@ -114,6 +181,7 @@ bink_enc_status bink_enc_verify(const char *path, const bink_enc_source *source,
 
     (void)options;
     memset(audio, 0, sizeof(audio));
+    memset(checks, 0, sizeof(checks));
     memset(channels, 0, sizeof(channels));
     memset(bitdepth, 0, sizeof(bitdepth));
     memset(rates, 0, sizeof(rates));
@@ -195,15 +263,45 @@ bink_enc_status bink_enc_verify(const char *path, const bink_enc_source *source,
                 result = fail(err, errlen, "decoded audio size does not match");
                 goto done;
             }
+            if (accumulate_audio(movie, source, track, &checks[track],
+                                 &scratch, &scratch_cap) != 0) {
+                result = fail(err, errlen, "out of memory");
+                goto done;
+            }
         }
         if (frames + 1 < source->frame_count) {
             status = bink_next(movie);
         }
     }
 
+    for (track = 0; track < source->audio_track_count; track++) {
+        const AudioCheck *check = &checks[track];
+        double rmse;
+        double level;
+        double cap;
+
+        if (check->count <= 0.0)
+            continue;
+        rmse = sqrt(check->error / check->count);
+        level = sqrt(check->signal / check->count);
+        cap = level * MAX_AUDIO_ERROR_RATIO;
+        if (cap < MAX_AUDIO_ERROR_FLOOR)
+            cap = MAX_AUDIO_ERROR_FLOOR;
+        if (rmse > cap) {
+            if (err != NULL && errlen > 0)
+                snprintf(err, errlen,
+                         "audio track %u exceeds tolerance (RMSE %.1f, "
+                         "source level %.1f)",
+                         track, rmse, level);
+            result = BINK_ENC_ERR_VERIFY;
+            goto done;
+        }
+    }
+
 done:
     for (track = 0; track < BINK_ENC_MAX_AUDIO_TRACKS; track++)
         bink_enc_audio_close(audio[track]);
+    free(scratch);
     free(rgb);
     free(y);
     free(u);
