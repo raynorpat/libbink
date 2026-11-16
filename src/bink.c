@@ -618,8 +618,8 @@ int bink_get_motion(const bink object, unsigned long *blocks_w,
 {
     if (object == NULL || !object->video_enabled || object->video == NULL)
         return 0;
-    if (!object->video->has_prev || object->video->mv_x == NULL ||
-        object->video->mv_y == NULL)
+    if (!object->video->has_prev || !object->video->motion_valid ||
+        object->video->mv_x == NULL || object->video->mv_y == NULL)
         return 0;
     if (blocks_w != NULL)
         *blocks_w = (unsigned long)object->video->bw;

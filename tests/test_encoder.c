@@ -649,6 +649,70 @@ done:
     return rc;
 }
 
+/* Odd plane sizes must still report ceil(w/8) x ceil(h/8) blocks. */
+static int test_motion_grid_odd(void)
+{
+    enum { W = 20, H = 12 };
+    uint8_t *frame;
+    mem_source mem;
+    bink_enc_options opt;
+    char path[1024];
+    char err[256];
+    bink_enc_status status;
+    unsigned x;
+    unsigned y;
+    unsigned long bw = 0;
+    unsigned long bh = 0;
+    bink movie;
+    int rc = 1;
+
+    frame = (uint8_t *)malloc((size_t)W * H * 3);
+    if (frame == NULL)
+        return 1;
+    for (y = 0; y < H; y++) {
+        for (x = 0; x < W; x++) {
+            uint8_t *p = frame + ((size_t)y * W + x) * 3;
+
+            p[0] = (uint8_t)(x * 11 + y);
+            p[1] = (uint8_t)(x + y * 17);
+            p[2] = (uint8_t)(255 - x * 3 - y);
+        }
+    }
+    memset(&mem, 0, sizeof(mem));
+    mem.frames = frame;
+    mem.width = W;
+    mem.height = H;
+    mem.count = 1;
+    mem.fail_index = -1;
+    bink_enc_options_default(&opt);
+    opt.verify = 1;
+    opt.motion_range = 0;
+    path_for(path, sizeof(path), "motion_odd.bik");
+    err[0] = '\0';
+    status = encode_mem(&mem, &opt, path, 0, err, sizeof(err));
+    if (expect_ok(status, err, "motion grid odd") != 0)
+        goto done;
+    movie = bink_open_file(path, BINK_MODE_DISK);
+    if (movie == NULL) {
+        fprintf(stderr, "FAIL motion grid: decoder rejected the file\n");
+        goto done;
+    }
+    if (bink_enable_video(movie, 1) != 0 || bink_first(movie) != BINK_LAST) {
+        fprintf(stderr, "FAIL motion grid: cannot decode\n");
+    } else if (!bink_get_motion(movie, &bw, &bh, NULL, NULL)) {
+        fprintf(stderr, "FAIL motion grid: unavailable\n");
+    } else if (bw != 3 || bh != 2) {
+        fprintf(stderr, "FAIL motion grid: %lu x %lu, expected 3 x 2\n", bw, bh);
+    } else {
+        rc = 0;
+    }
+    bink_close(movie);
+done:
+    remove(path);
+    free(frame);
+    return rc;
+}
+
 static int test_inter_dct(void)
 {
     enum { W = 64, H = 48, N = 3 };
@@ -2596,6 +2660,8 @@ int main(void)
     if (test_skip_and_motion() != 0)
         return 1;
     if (test_motion_field() != 0)
+        return 1;
+    if (test_motion_grid_odd() != 0)
         return 1;
     if (test_intra_dct() != 0)
         return 1;

@@ -4,7 +4,7 @@ Status: awaiting approval. New tool; does not change decoder output.
 
 ## Intent
 
-A second player binary, `bink_gl_player`, that presents decoded frames
+A second player binary, `bink_sdlgl_player`, that presents decoded frames
 through OpenGL and offers two selectable GLSL paths:
 
 1. **Presentation** — Y, U and V uploaded as single-channel textures and
@@ -149,7 +149,7 @@ converted exactly as in shader 1.
 
 ## Player structure
 
-- `src/tools/bink_gl_player.c` — window, GL context, GL entry-point
+- `src/tools/bink_sdlgl_player.c` — window, GL context, GL entry-point
   loader, textures, loop, keys.
 - `src/tools/bink_gl_shaders.h` — the two shader source strings.
 - `src/tools/bink_playback.{c,h}` — everything both players share: the
@@ -175,7 +175,7 @@ the pair), `M` toggles interpolation. The title shows which is active.
 
 ## Files
 
-- Create: `src/tools/bink_gl_player.c`, `src/tools/bink_gl_shaders.h`,
+- Create: `src/tools/bink_sdlgl_player.c`, `src/tools/bink_gl_shaders.h`,
   `src/tools/bink_audio_out.c`, `src/tools/bink_audio_out.h`.
 - Modify: `src/tools/bink_sdl_player.c` (use the shared audio wrapper),
   `CMakeLists.txt` (new target, OpenGL link, deprecation warning guard),

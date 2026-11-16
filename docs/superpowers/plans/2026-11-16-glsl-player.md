@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add `bink_gl_player`, an SDL2/SDL3 + OpenGL player whose two
+**Goal:** Add `bink_sdlgl_player`, an SDL2/SDL3 + OpenGL player whose two
 GLSL shaders either present decoded YUV or reconstruct in-between frames
 from the decoder's per-block motion vectors.
 
@@ -188,27 +188,27 @@ git commit -m "tools: share the playback audio and seek code"
 ### Task 3: GL player with the presentation shader
 
 **Files:**
-- Create: `src/tools/bink_gl_player.c`, `src/tools/bink_gl_shaders.h`
+- Create: `src/tools/bink_sdlgl_player.c`, `src/tools/bink_gl_shaders.h`
 - Modify: `CMakeLists.txt`
 
 **Interfaces:**
 - Consumes: `BinkPlayback` from Task 2, `bink_get_motion` from Task 1
   (not used until Task 4).
-- Produces: a `bink_gl_player` executable; shader source strings
+- Produces: a `bink_sdlgl_player` executable; shader source strings
   `bink_gl_vs`, `bink_gl_fs_present`, `bink_gl_fs_interpolate` (the last
   filled in by Task 4).
 
 - [ ] **Step 1: Add the target**
 
 In `CMakeLists.txt`, inside the existing SDL block, add
-`add_executable(bink_gl_player src/tools/bink_gl_player.c
+`add_executable(bink_sdlgl_player src/tools/bink_sdlgl_player.c
 src/tools/bink_playback.c src/tools/bink_mix.c)` with the same compile
 settings and SDL linkage as `bink_sdl_player`, plus the deprecation
 warning suppressed for this target only on Apple. No OpenGL link.
 
 - [ ] **Step 2: Write the GL skeleton**
 
-In `bink_gl_player.c`: open the file with `bink_open_file`, enable video,
+In `bink_sdlgl_player.c`: open the file with `bink_open_file`, enable video,
 print the same summary the SDL player does, create a window with
 `SDL_WINDOW_OPENGL`, set the context attributes (3.2 core, double
 buffer), create the context, resolve the entry points used (`glGen*`,
@@ -235,20 +235,20 @@ Loop like the SDL player: decode, publish audio through
 `BinkPlayback`, upload the planes, draw, wait for the frame deadline
 (wall clock, or the audio deadline when audio is ready). Keys: Esc/q
 quit, Space pause, Left/Right seek via `bink_playback_seek`. Title:
-`bink_gl_player - presentation`.
+`bink_sdlgl_player - presentation`.
 
 - [ ] **Step 5: Build and run**
 
 Run: `cmake -S . -B build -DBINK_BUILD_TOOLS=ON && cmake --build build`
-Expected: `bink_gl_player` builds with no warnings from our code.
+Expected: `bink_sdlgl_player` builds with no warnings from our code.
 
-Run: `./build/bink_gl_player <clip>` and confirm the picture matches the
+Run: `./build/bink_sdlgl_player <clip>` and confirm the picture matches the
 SDL player's frames in order.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/tools/bink_gl_player.c src/tools/bink_gl_shaders.h CMakeLists.txt
+git add src/tools/bink_sdlgl_player.c src/tools/bink_gl_shaders.h CMakeLists.txt
 git commit -m "tools: add an OpenGL player with a presentation shader"
 ```
 
@@ -257,7 +257,7 @@ git commit -m "tools: add an OpenGL player with a presentation shader"
 ### Task 4: Motion-compensated interpolation shader
 
 **Files:**
-- Modify: `src/tools/bink_gl_player.c`, `src/tools/bink_gl_shaders.h`
+- Modify: `src/tools/bink_sdlgl_player.c`, `src/tools/bink_gl_shaders.h`
 
 **Interfaces:**
 - Consumes: `bink_get_motion`.
@@ -305,7 +305,7 @@ a skipped or repeated frame, and that seeking resets the pair.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/tools/bink_gl_player.c src/tools/bink_gl_shaders.h
+git add src/tools/bink_sdlgl_player.c src/tools/bink_gl_shaders.h
 git commit -m "tools: interpolate between frames in the GL player"
 ```
 
@@ -318,7 +318,7 @@ git commit -m "tools: interpolate between frames in the GL player"
 
 - [ ] **Step 1: Describe the tool**
 
-Add `bink_gl_player` to the tools section: what it needs (SDL2 or SDL3,
+Add `bink_sdlgl_player` to the tools section: what it needs (SDL2 or SDL3,
 OpenGL 3.2), the two shaders, and the `M` key. One short paragraph.
 
 - [ ] **Step 2: Check the build notes**

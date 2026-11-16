@@ -86,7 +86,7 @@ Full documentation is in `docs/usage.md`.
 - `bink_sdl_player video.bik` - SDL3 (preferred) or SDL2 playback.
   Enables every audio track and mixes them. Esc/Q quits, Space pauses the
   picture and the sound, Left/Right seek one second.
-- `bink_gl_player video.bik` - the same controls on an OpenGL 3.2 window.
+- `bink_sdlgl_player video.bik` - the same controls on an OpenGL 3.2 window.
   The YUV to RGB conversion runs in a GLSL shader, and `M` switches to a
   second shader that interpolates between decoded frames using the
   decoder's motion vectors, so motion looks smoother than the source

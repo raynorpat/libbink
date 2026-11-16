@@ -12,16 +12,16 @@
  *                   warped by the decoder's own per-block vectors
  *
  * Usage:
- *   bink_gl_player file.bik
+ *   bink_sdlgl_player file.bik
  *
  * Keys: Esc/q quit, Space pauses the picture and the sound,
  *       Left/Right seek one second, M toggles interpolation.
  *
  * Test hooks, all optional environment variables:
- *   BINK_GL_TEST_FRAMES=N  exit after N decoded frames
- *   BINK_GL_SHADER=present|interp  start with that shader
- *   BINK_GL_T=0..1         force the blend factor (implies interp)
- *   BINK_GL_DUMP=path.ppm  write one frame, compare it with the decoder's
+ *   BINK_SDLGL_TEST_FRAMES=N  exit after N decoded frames
+ *   BINK_SDLGL_SHADER=present|interp  start with that shader
+ *   BINK_SDLGL_T=0..1         force the blend factor (implies interp)
+ *   BINK_SDLGL_DUMP=path.ppm  write one frame, compare it with the decoder's
  *                          own RGB, and exit
  */
 
@@ -107,6 +107,9 @@ typedef void (APIENTRYP BINK_PFN_glClearColor)(GLfloat, GLfloat, GLfloat,
 typedef void (APIENTRYP BINK_PFN_glClear)(GLbitfield);
 typedef void (APIENTRYP BINK_PFN_glReadPixels)(GLint, GLint, GLsizei, GLsizei,
                                                GLenum, GLenum, void *);
+typedef void (APIENTRYP BINK_PFN_glDeleteShader)(GLuint);
+typedef void (APIENTRYP BINK_PFN_glDeleteProgram)(GLuint);
+typedef GLenum (APIENTRYP BINK_PFN_glGetError)(void);
 
 typedef struct {
     BINK_PFN_glGenTextures GenTextures;
@@ -146,6 +149,9 @@ typedef struct {
     BINK_PFN_glClearColor ClearColor;
     BINK_PFN_glClear Clear;
     BINK_PFN_glReadPixels ReadPixels;
+    BINK_PFN_glDeleteShader DeleteShader;
+    BINK_PFN_glDeleteProgram DeleteProgram;
+    BINK_PFN_glGetError GetError;
 } BinkGL;
 
 static BinkGL gl;
@@ -223,6 +229,9 @@ static int gl_load(void)
     LOAD(ClearColor, glClearColor);
     LOAD(Clear, glClear);
     LOAD(ReadPixels, glReadPixels);
+    LOAD(DeleteShader, glDeleteShader);
+    LOAD(DeleteProgram, glDeleteProgram);
+    LOAD(GetError, glGetError);
     return 0;
 }
 
@@ -260,15 +269,22 @@ static GLuint link_program(const char *fragment, const char *what)
     if (vs == 0)
         return 0;
     fs = compile_shader(GL_FRAGMENT_SHADER, fragment, what);
-    if (fs == 0)
+    if (fs == 0) {
+        gl.DeleteShader(vs);
         return 0;
+    }
     program = gl.CreateProgram();
-    if (program == 0)
+    if (program == 0) {
+        gl.DeleteShader(vs);
+        gl.DeleteShader(fs);
         return 0;
+    }
     gl.AttachShader(program, vs);
     gl.AttachShader(program, fs);
     gl.BindAttribLocation(program, 0, "a_pos");
     gl.LinkProgram(program);
+    gl.DeleteShader(vs);
+    gl.DeleteShader(fs);
     gl.GetProgramiv(program, GL_LINK_STATUS, &ok);
     if (!ok) {
         char log[1024];
@@ -276,6 +292,7 @@ static GLuint link_program(const char *fragment, const char *what)
         log[0] = '\0';
         gl.GetProgramInfoLog(program, (GLsizei)sizeof(log), NULL, log);
         fprintf(stderr, "%s program failed to link:\n%s\n", what, log);
+        gl.DeleteProgram(program);
         return 0;
     }
     return program;
@@ -328,48 +345,62 @@ static void upload_frame(GLuint slots[3], bink object, unsigned long w,
 
 /* Upload a frame and remember its packed RGB, which the dump mode compares
  * against. */
+static int dump_enabled;
+
 static void upload_slot(GLuint slots[3], unsigned char *rgb, bink object,
                         unsigned long w, unsigned long h)
 {
     const unsigned char *packed;
 
     upload_frame(slots, object, w, h);
+    if (!dump_enabled)
+        return;
     packed = bink_get_video(object);
     if (packed != NULL)
         memcpy(rgb, packed, (size_t)w * (size_t)h * 3u);
 }
 
-/* The frame's motion field as RG8, one texel per 8x8 luma block. */
-static void upload_motion(GLuint texture, bink object,
-                          unsigned long *blocks_w, unsigned long *blocks_h)
+/* The frame's motion field as RG8, one texel per 8x8 luma block. The
+ * texel buffer persists; it is sized on the first frame. */
+static unsigned char *mv_pixels;
+static size_t mv_pixels_cap;
+
+static int upload_motion(GLuint texture, bink object, unsigned long *blocks_w,
+                         unsigned long *blocks_h)
 {
     const signed char *mx = NULL;
     const signed char *my = NULL;
     unsigned long bw = 0;
     unsigned long bh = 0;
-    unsigned char *texels;
+    size_t need;
     unsigned long i;
 
     *blocks_w = 0;
     *blocks_h = 0;
     if (!bink_get_motion(object, &bw, &bh, &mx, &my) || bw == 0 || bh == 0)
-        return;
-    texels = (unsigned char *)malloc((size_t)bw * (size_t)bh * 2u);
-    if (texels == NULL)
-        return;
+        return -1;
+    need = (size_t)bw * (size_t)bh * 2u;
+    if (need > mv_pixels_cap) {
+        unsigned char *grown = (unsigned char *)realloc(mv_pixels, need);
+
+        if (grown == NULL)
+            return -1;
+        mv_pixels = grown;
+        mv_pixels_cap = need;
+    }
     for (i = 0; i < bw * bh; i++) {
-        texels[i * 2u] = (unsigned char)((int)mx[i] + 128);
-        texels[i * 2u + 1u] = (unsigned char)((int)my[i] + 128);
+        mv_pixels[i * 2u] = (unsigned char)((int)mx[i] + 128);
+        mv_pixels[i * 2u + 1u] = (unsigned char)((int)my[i] + 128);
     }
     gl.BindTexture(GL_TEXTURE_2D, texture);
     gl.PixelStorei(GL_UNPACK_ALIGNMENT, 1);
     gl.PixelStorei(GL_UNPACK_ROW_LENGTH, (int)bw);
     gl.TexImage2D(GL_TEXTURE_2D, 0, GL_RG8, (GLsizei)bw, (GLsizei)bh, 0, GL_RG,
-                  GL_UNSIGNED_BYTE, texels);
+                  GL_UNSIGNED_BYTE, mv_pixels);
     gl.PixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-    free(texels);
     *blocks_w = bw;
     *blocks_h = bh;
+    return 0;
 }
 
 static void wait_until(double target_ms)
@@ -504,7 +535,7 @@ int main(int argc, char **argv)
     unsigned char bitdepth[7];
     unsigned long rates[7];
     unsigned long test_frames = 0;
-    unsigned long decoded = 1;
+    unsigned long shown = 0;
     char title[512];
     char status = 0;
     int enabled[7];
@@ -522,10 +553,10 @@ int main(int argc, char **argv)
     int has_next = 0;
     int drawable_w = 0;
     int drawable_h = 0;
-    const char *dump_path = getenv("BINK_GL_DUMP");
-    const char *force_shader = getenv("BINK_GL_SHADER");
-    const char *force_t = getenv("BINK_GL_T");
-    const char *test_seek_env = getenv("BINK_GL_TEST_SEEK");
+    const char *dump_path = getenv("BINK_SDLGL_DUMP");
+    const char *force_shader = getenv("BINK_SDLGL_SHADER");
+    const char *force_t = getenv("BINK_SDLGL_T");
+    const char *test_seek_env = getenv("BINK_SDLGL_TEST_SEEK");
     long test_seek = -1;
     GLint p_y = -1;
     GLint p_u = -1;
@@ -547,6 +578,7 @@ int main(int argc, char **argv)
     int i;
 
     memset(tex, 0, sizeof(tex));
+    dump_enabled = dump_path != NULL;
     slot_rgb[0] = NULL;
     slot_rgb[1] = NULL;
     {
@@ -564,7 +596,7 @@ int main(int argc, char **argv)
     path = argv[1];
 
     {
-        const char *env = getenv("BINK_GL_TEST_FRAMES");
+        const char *env = getenv("BINK_SDLGL_TEST_FRAMES");
 
         if (env != NULL && env[0] != '\0') {
             char *end = NULL;
@@ -687,6 +719,20 @@ int main(int argc, char **argv)
     i_blocks = gl.GetUniformLocation(program_interp, "u_blocks");
     i_t = gl.GetUniformLocation(program_interp, "u_t");
 
+    if (p_y < 0 || p_u < 0 || p_v < 0 || p_matrix < 0 || p_offset < 0 ||
+        i_y0 < 0 || i_u0 < 0 || i_v0 < 0 || i_y1 < 0 || i_u1 < 0 ||
+        i_v1 < 0 || i_mv < 0 || i_matrix < 0 || i_offset < 0 || i_luma < 0 ||
+        i_blocks < 0 || i_t < 0) {
+        fprintf(stderr, "A shader uniform is missing; cannot present.\n");
+        exit_code = 1;
+        goto done;
+    }
+    if (gl.GetError() != GL_NO_ERROR) {
+        fprintf(stderr, "GL reported an error during setup.\n");
+        exit_code = 1;
+        goto done;
+    }
+
     {
         static const GLfloat quad[] = {
             -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f,
@@ -772,15 +818,18 @@ int main(int argc, char **argv)
         status = bink_next(b);
         if (status == BINK_MORE || status == BINK_LAST) {
             upload_slot(tex[1], slot_rgb[1], b, w, h);
-            upload_motion(mv_tex, b, &blocks_w, &blocks_h);
             has_next = 1;
+            if (upload_motion(mv_tex, b, &blocks_w, &blocks_h) != 0) {
+                fprintf(stderr, "No motion field; interpolation off.\n");
+                interp = 0;
+            }
         }
     }
 
     printf("Opened file %s\nWidth: %lu\nHeight: %lu\nFrames: %lu\nFPS: %f\n",
            path, w, h, frames, 1000000.0 / usf);
     fflush(stdout);
-    snprintf(title, sizeof(title), "bink_gl_player - %s - %s", path,
+    snprintf(title, sizeof(title), "bink_sdlgl_player - %s - %s", path,
              interp ? "interpolation" : "presentation");
     SDL_SetWindowTitle(window, title);
 
@@ -807,7 +856,7 @@ int main(int argc, char **argv)
                 bink_playback_set_paused(&audio, paused, &device_paused);
             } else if (key == BINK_KEY_M) {
                 interp = !interp;
-                snprintf(title, sizeof(title), "bink_gl_player - %s - %s",
+                snprintf(title, sizeof(title), "bink_sdlgl_player - %s - %s",
                          path, interp ? "interpolation" : "presentation");
                 SDL_SetWindowTitle(window, title);
             } else if (key == SDLK_LEFT || key == SDLK_RIGHT) {
@@ -851,9 +900,11 @@ int main(int argc, char **argv)
                     if (next_status == BINK_MORE || next_status == BINK_LAST) {
                         status = next_status;
                         upload_slot(tex[cur ^ 1], slot_rgb[cur ^ 1], b, w, h);
-                        upload_motion(mv_tex, b, &blocks_w, &blocks_h);
                         has_next = 1;
-                        decoded++;
+                        if (upload_motion(mv_tex, b, &blocks_w, &blocks_h) != 0) {
+                            fprintf(stderr, "No motion field; interpolation off.\n");
+                            interp = 0;
+                        }
                     }
                 }
             }
@@ -959,6 +1010,7 @@ int main(int argc, char **argv)
                 break;
         }
         SDL_GL_SwapWindow(window);
+        shown++;
 
         if (advanced) {
             start_ms += frame_ms;
@@ -973,8 +1025,10 @@ int main(int argc, char **argv)
                 status = bink_next(b);
                 if (status == BINK_MORE || status == BINK_LAST) {
                     upload_slot(tex[cur ^ 1], slot_rgb[cur ^ 1], b, w, h);
-                    upload_motion(mv_tex, b, &blocks_w, &blocks_h);
-                    decoded++;
+                    if (upload_motion(mv_tex, b, &blocks_w, &blocks_h) != 0) {
+                        fprintf(stderr, "No motion field; interpolation off.\n");
+                        interp = 0;
+                    }
                 } else {
                     has_next = 0;
                 }
@@ -983,7 +1037,7 @@ int main(int argc, char **argv)
             }
         }
 
-        if (test_frames != 0 && decoded >= test_frames)
+        if (test_frames != 0 && shown >= test_frames)
             break;
         /* The last frame holds for one frame time, then playback ends. */
         if (!has_next && status == BINK_LAST &&
@@ -1001,6 +1055,9 @@ done:
     bink_playback_shutdown();
     free(slot_rgb[0]);
     free(slot_rgb[1]);
+    free(mv_pixels);
+    mv_pixels = NULL;
+    mv_pixels_cap = 0;
     if (context != NULL)
         BINK_GL_DELETE_CONTEXT(context);
     if (window != NULL)

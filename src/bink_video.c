@@ -994,6 +994,16 @@ int bink_video_read_residue(BinkBits *bits, int16_t block[64])
     return read_residue(bits, block, budget);
 }
 
+/* Vectors are bytes in the field; clamp rather than wrap a corrupt stream. */
+static signed char clamp_mv(int value)
+{
+    if (value < -127)
+        return -127;
+    if (value > 127)
+        return 127;
+    return (signed char)value;
+}
+
 static int bink_put_pixels(BinkVideo *v, unsigned char *dst,
                            unsigned char *prev, int stride,
                            unsigned char *ref_start, unsigned char *ref_end,
@@ -1005,11 +1015,11 @@ static int bink_put_pixels(BinkVideo *v, unsigned char *dst,
 
     if (xoff == BINK_VALUE_ERROR || yoff == BINK_VALUE_ERROR)
         return -1;
-    *xoff_out = xoff;
-    *yoff_out = yoff;
     ref = prev + xoff + (size_t)yoff * (size_t)stride;
     if (ref < ref_start || ref > ref_end)
         return 0; /* invalid stream: leave the destination block unchanged */
+    *xoff_out = xoff;
+    *yoff_out = yoff;
     copy_block_overlapped(dst, ref, stride);
     return 0;
 }
@@ -1225,8 +1235,8 @@ static int decode_plane(BinkVideo *v, BinkBits *bits, int plane, int is_chroma)
                 if (ret < 0)
                     return -1;
                 if (plane == 0) {
-                    v->mv_x[by * bw + bx] = (signed char)mvx;
-                    v->mv_y[by * bw + bx] = (signed char)mvy;
+                    v->mv_x[by * bw + bx] = clamp_mv(mvx);
+                    v->mv_y[by * bw + bx] = clamp_mv(mvy);
                 }
                 break;
             case RUN_BLOCK:
@@ -1286,8 +1296,8 @@ static int decode_plane(BinkVideo *v, BinkBits *bits, int plane, int is_chroma)
                 if (ret < 0)
                     return -1;
                 if (plane == 0) {
-                    v->mv_x[by * bw + bx] = (signed char)mvx;
-                    v->mv_y[by * bw + bx] = (signed char)mvy;
+                    v->mv_x[by * bw + bx] = clamp_mv(mvx);
+                    v->mv_y[by * bw + bx] = clamp_mv(mvy);
                 }
                 memset(block, 0, sizeof(block));
                 masks = bink_bits_read(bits, 7);
@@ -1334,8 +1344,8 @@ static int decode_plane(BinkVideo *v, BinkBits *bits, int plane, int is_chroma)
                 if (ret < 0)
                     return -1;
                 if (plane == 0) {
-                    v->mv_x[by * bw + bx] = (signed char)mvx;
-                    v->mv_y[by * bw + bx] = (signed char)mvy;
+                    v->mv_x[by * bw + bx] = clamp_mv(mvx);
+                    v->mv_y[by * bw + bx] = clamp_mv(mvy);
                 }
                 dc = get_value(v, BINK_SRC_INTER_DC);
                 if (dc == BINK_VALUE_ERROR)
@@ -1398,6 +1408,7 @@ int bink_video_decode(BinkVideo *v, const unsigned char *data, size_t size)
         return -1;
 
     bink_bits_init(&bits, data, size);
+    v->motion_valid = 0;
     if (v->mv_x != NULL)
         memset(v->mv_x, 0, (size_t)v->bw * (size_t)v->bh);
     if (v->mv_y != NULL)
@@ -1437,5 +1448,6 @@ int bink_video_decode(BinkVideo *v, const unsigned char *data, size_t size)
 
     v->has_prev = 1;
     v->rgb_valid = 0;
+    v->motion_valid = 1;
     return 0;
 }
