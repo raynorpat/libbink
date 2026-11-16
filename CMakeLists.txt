@@ -137,7 +137,7 @@ if(BINK_BUILD_TOOLS)
     message(WARNING "SDL2/SDL3 not found; skipping bink_sdl_player.")
   else()
     add_executable(bink_sdl_player src/tools/bink_sdl_player.c
-                   src/tools/bink_mix.c)
+                   src/tools/bink_mix.c src/tools/bink_playback.c)
     bink_set_compile_settings(bink_sdl_player)
     if(BINK_USE_SDL3)
       target_compile_definitions(bink_sdl_player PRIVATE BINK_USE_SDL3=1)
