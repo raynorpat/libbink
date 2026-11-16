@@ -441,6 +441,12 @@ int bink_video_init(BinkVideo *v, unsigned long width, unsigned long height,
             v->bundles[i].data_end = v->bundles[i].data + bundle_size;
         }
     }
+    v->mv_x = (signed char *)calloc((size_t)v->bw * (size_t)v->bh, 1);
+    v->mv_y = (signed char *)calloc((size_t)v->bw * (size_t)v->bh, 1);
+    if (v->mv_x == NULL || v->mv_y == NULL) {
+        bink_video_uninit(v);
+        return -1;
+    }
 
     return 0;
 }
@@ -458,6 +464,10 @@ void bink_video_uninit(BinkVideo *v)
         v->ref[i] = NULL;
     }
     free(v->bundle_data);
+    free(v->mv_x);
+    free(v->mv_y);
+    v->mv_x = NULL;
+    v->mv_y = NULL;
     v->bundle_data = NULL;
     free(v->rgb);
     v->rgb = NULL;
@@ -986,7 +996,8 @@ int bink_video_read_residue(BinkBits *bits, int16_t block[64])
 
 static int bink_put_pixels(BinkVideo *v, unsigned char *dst,
                            unsigned char *prev, int stride,
-                           unsigned char *ref_start, unsigned char *ref_end)
+                           unsigned char *ref_start, unsigned char *ref_end,
+                           int *xoff_out, int *yoff_out)
 {
     int xoff = get_value(v, BINK_SRC_X_OFF);
     int yoff = get_value(v, BINK_SRC_Y_OFF);
@@ -994,6 +1005,8 @@ static int bink_put_pixels(BinkVideo *v, unsigned char *dst,
 
     if (xoff == BINK_VALUE_ERROR || yoff == BINK_VALUE_ERROR)
         return -1;
+    *xoff_out = xoff;
+    *yoff_out = yoff;
     ref = prev + xoff + (size_t)yoff * (size_t)stride;
     if (ref < ref_start || ref > ref_end)
         return 0; /* invalid stream: leave the destination block unchanged */
@@ -1028,6 +1041,8 @@ static int decode_plane(BinkVideo *v, BinkBits *bits, int plane, int is_chroma)
     unsigned char ublock[64];
     int32_t dctblock[64];
     int16_t block[64];
+    int mvx = 0;
+    int mvy = 0;
 
     (void)height;
 
@@ -1206,9 +1221,13 @@ static int decode_plane(BinkVideo *v, BinkBits *bits, int plane, int is_chroma)
                 break;
             case MOTION_BLOCK:
                 ret = bink_put_pixels(v, dst, prev, stride, ref_start,
-                                      ref_end);
+                                      ref_end, &mvx, &mvy);
                 if (ret < 0)
                     return -1;
+                if (plane == 0) {
+                    v->mv_x[by * bw + bx] = (signed char)mvx;
+                    v->mv_y[by * bw + bx] = (signed char)mvy;
+                }
                 break;
             case RUN_BLOCK:
             {
@@ -1263,9 +1282,13 @@ static int decode_plane(BinkVideo *v, BinkBits *bits, int plane, int is_chroma)
                 int masks;
 
                 ret = bink_put_pixels(v, dst, prev, stride, ref_start,
-                                      ref_end);
+                                      ref_end, &mvx, &mvy);
                 if (ret < 0)
                     return -1;
+                if (plane == 0) {
+                    v->mv_x[by * bw + bx] = (signed char)mvx;
+                    v->mv_y[by * bw + bx] = (signed char)mvy;
+                }
                 memset(block, 0, sizeof(block));
                 masks = bink_bits_read(bits, 7);
                 if (masks < 0)
@@ -1307,9 +1330,13 @@ static int decode_plane(BinkVideo *v, BinkBits *bits, int plane, int is_chroma)
                 int dc;
 
                 ret = bink_put_pixels(v, dst, prev, stride, ref_start,
-                                      ref_end);
+                                      ref_end, &mvx, &mvy);
                 if (ret < 0)
                     return -1;
+                if (plane == 0) {
+                    v->mv_x[by * bw + bx] = (signed char)mvx;
+                    v->mv_y[by * bw + bx] = (signed char)mvy;
+                }
                 dc = get_value(v, BINK_SRC_INTER_DC);
                 if (dc == BINK_VALUE_ERROR)
                     return -1;
@@ -1371,6 +1398,10 @@ int bink_video_decode(BinkVideo *v, const unsigned char *data, size_t size)
         return -1;
 
     bink_bits_init(&bits, data, size);
+    if (v->mv_x != NULL)
+        memset(v->mv_x, 0, (size_t)v->bw * (size_t)v->bh);
+    if (v->mv_y != NULL)
+        memset(v->mv_y, 0, (size_t)v->bw * (size_t)v->bh);
 
     /* Ping-pong: decode into the buffer that is not the current reference.
      * On the first frame there is no reference, so the decoder reads back

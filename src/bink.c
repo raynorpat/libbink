@@ -612,6 +612,26 @@ int bink_get_stride(const bink object, int plane)
     return bink_video_stride(object->video, plane);
 }
 
+int bink_get_motion(const bink object, unsigned long *blocks_w,
+                    unsigned long *blocks_h, const signed char **mv_x,
+                    const signed char **mv_y)
+{
+    if (object == NULL || !object->video_enabled || object->video == NULL)
+        return 0;
+    if (!object->video->has_prev || object->video->mv_x == NULL ||
+        object->video->mv_y == NULL)
+        return 0;
+    if (blocks_w != NULL)
+        *blocks_w = (unsigned long)object->video->bw;
+    if (blocks_h != NULL)
+        *blocks_h = (unsigned long)object->video->bh;
+    if (mv_x != NULL)
+        *mv_x = object->video->mv_x;
+    if (mv_y != NULL)
+        *mv_y = object->video->mv_y;
+    return 1;
+}
+
 const unsigned char *bink_get_audio(const bink object, unsigned char track)
 {
     BinkAudio *audio;

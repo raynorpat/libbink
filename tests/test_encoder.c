@@ -546,6 +546,109 @@ static int decode_within(bink movie, const uint8_t *frames, int count,
     return 1;
 }
 
+/* The decoder must expose the vectors it actually used, one per 8x8 luma
+ * block, so a renderer can warp frames. */
+static int test_motion_field(void)
+{
+    enum { W = 64, H = 48 };
+    uint8_t *frames;
+    mem_source mem;
+    bink_enc_options opt;
+    char path[1024];
+    char err[256];
+    bink_enc_status status;
+    size_t frame_bytes = (size_t)W * H * 3;
+    unsigned x;
+    unsigned y;
+    unsigned long bw = 0;
+    unsigned long bh = 0;
+    const signed char *mx = NULL;
+    const signed char *my = NULL;
+    bink movie;
+    int found = 0;
+    unsigned long i;
+    int rc = 1;
+
+    frames = (uint8_t *)calloc(2, frame_bytes);
+    if (frames == NULL) {
+        fprintf(stderr, "FAIL motion field: out of memory\n");
+        return 1;
+    }
+    for (y = 0; y < H; y++) {
+        for (x = 0; x < W; x++) {
+            uint8_t *p = frames + ((size_t)y * W + x) * 3;
+
+            p[0] = (uint8_t)(x * 8);
+            p[1] = (uint8_t)(y * 10);
+            p[2] = (uint8_t)(40 + x);
+        }
+    }
+    fill_shift(frames + frame_bytes, frames, W, H, 3, 2);
+
+    memset(&mem, 0, sizeof(mem));
+    mem.frames = frames;
+    mem.width = W;
+    mem.height = H;
+    mem.count = 2;
+    mem.fail_index = -1;
+    bink_enc_options_default(&opt);
+    opt.verify = 1;
+    opt.keyframe_interval = 0;
+    opt.motion_range = 8;
+    path_for(path, sizeof(path), "motion_field.bik");
+    err[0] = '\0';
+    status = encode_mem(&mem, &opt, path, 0, err, sizeof(err));
+    if (expect_ok(status, err, "motion field") != 0)
+        goto done;
+    movie = bink_open_file(path, BINK_MODE_DISK);
+    if (movie == NULL) {
+        fprintf(stderr, "FAIL motion field: decoder rejected the file\n");
+        goto done;
+    }
+    if (bink_enable_video(movie, 1) != 0 || bink_first(movie) != BINK_MORE) {
+        fprintf(stderr, "FAIL motion field: cannot decode frame 0\n");
+        goto close_movie;
+    }
+    if (!bink_get_motion(movie, &bw, &bh, &mx, &my)) {
+        fprintf(stderr, "FAIL motion field: unavailable on a keyframe\n");
+        goto close_movie;
+    }
+    if (bw != W / 8 || bh != H / 8) {
+        fprintf(stderr, "FAIL motion field: grid %lu x %lu\n", bw, bh);
+        goto close_movie;
+    }
+    for (i = 0; i < bw * bh; i++) {
+        if (mx[i] != 0 || my[i] != 0) {
+            fprintf(stderr, "FAIL motion field: keyframe block %lu has %d,%d\n",
+                    i, mx[i], my[i]);
+            goto close_movie;
+        }
+    }
+    if (bink_next(movie) != BINK_LAST) {
+        fprintf(stderr, "FAIL motion field: cannot decode frame 1\n");
+        goto close_movie;
+    }
+    if (!bink_get_motion(movie, &bw, &bh, &mx, &my)) {
+        fprintf(stderr, "FAIL motion field: unavailable on a P frame\n");
+        goto close_movie;
+    }
+    for (i = 0; i < bw * bh; i++) {
+        if (mx[i] == -3 && my[i] == -2)
+            found++;
+    }
+    if (found == 0) {
+        fprintf(stderr, "FAIL motion field: no block reports the shift\n");
+        goto close_movie;
+    }
+    rc = 0;
+close_movie:
+    bink_close(movie);
+done:
+    remove(path);
+    free(frames);
+    return rc;
+}
+
 static int test_inter_dct(void)
 {
     enum { W = 64, H = 48, N = 3 };
@@ -2491,6 +2594,8 @@ int main(void)
     if (test_pictures() != 0)
         return 1;
     if (test_skip_and_motion() != 0)
+        return 1;
+    if (test_motion_field() != 0)
         return 1;
     if (test_intra_dct() != 0)
         return 1;

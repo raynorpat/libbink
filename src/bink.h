@@ -98,6 +98,15 @@ int bink_get_stride(const bink object, int plane);
 const unsigned char *bink_get_audio(const bink object, unsigned char track);
 /** byte length of that PCM, or 0 when the pointer is NULL */
 unsigned long bink_get_audio_size(const bink object, unsigned char track);
+/**
+ * Per-8x8-block motion vectors of the current frame's luma plane, in
+ * pixels, indexed [by * blocks_w + bx]. Returns 1 when available and 0
+ * when the file has no enabled video. Vectors are (0,0) for blocks that
+ * are not motion-compensated. Any out-parameter may be NULL.
+ */
+int bink_get_motion(const bink object, unsigned long *blocks_w,
+                    unsigned long *blocks_h, const signed char **mv_x,
+                    const signed char **mv_y);
 
 #ifdef __cplusplus
 }

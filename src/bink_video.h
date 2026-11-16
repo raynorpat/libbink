@@ -67,6 +67,10 @@ typedef struct BinkVideo {
 
     int has_prev;
 
+    /* Per-8x8-block luma motion vectors of the current frame, bw * bh. */
+    signed char *mv_x;
+    signed char *mv_y;
+
     unsigned char *rgb;
     unsigned long rgb_size;
     int rgb_valid;
