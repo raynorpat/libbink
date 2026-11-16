@@ -17,7 +17,7 @@ struct BinkEncAudio {
     size_t sample_count;
     int block_out;
     float *out;
-    float *tab;
+    BinkAudioDct *dct;
     int16_t *look;
 };
 
@@ -62,11 +62,11 @@ int bink_enc_audio_open(BinkEncAudio **out, const bink_enc_audio_info *info,
     audio->look = (int16_t *)calloc(
         (size_t)audio->info.channels * (size_t)audio->info.overlap_len,
         sizeof(int16_t));
-    audio->tab = bink_audio_dct_table(audio->info.frame_len);
-    if (audio->out == NULL || audio->look == NULL || audio->tab == NULL) {
+    audio->dct = bink_audio_dct_open(audio->info.frame_len);
+    if (audio->out == NULL || audio->look == NULL || audio->dct == NULL) {
         free(audio->out);
         free(audio->look);
-        free(audio->tab);
+        bink_audio_dct_close(audio->dct);
         free(audio);
         return -1;
     }
@@ -99,7 +99,7 @@ void bink_enc_audio_close(BinkEncAudio *audio)
         return;
     free(audio->out);
     free(audio->look);
-    free(audio->tab);
+    bink_audio_dct_close(audio->dct);
     free(audio);
 }
 
@@ -233,7 +233,7 @@ int bink_enc_audio_frame(BinkEncAudio *audio, const bink_enc_source *source,
                           ? audio->out + audio->info.frame_len
                           : NULL;
         if (bink_audio_write_dct_block(&writer, &audio->info, out_ptrs,
-                                       audio->tab) != 0 ||
+                                       audio->dct) != 0 ||
             bink_bw_align32(&writer) != 0) {
             free(samples);
             bink_bw_free(&writer);

@@ -35,14 +35,22 @@ int bink_audio_describe(unsigned long rate, int channels, int use_dct,
                         BinkAudioInfo *info);
 int bink_audio_create(BinkAudio **out, unsigned long rate, int channels,
                       int use_dct, unsigned long max_bytes);
+/** Forward DCT-II scratch, sized once per frame length. */
+typedef struct BinkAudioDct BinkAudioDct;
+
 /**
- * Cosine table for the forward DCT-II of one DCT block:
- * tab[k * frame_len + t] = cos(pi / frame_len * (t + 0.5) * k).
- * Returns frame_len * frame_len floats, or NULL. Free with free().
- * The size is quadratic: 4 MB at frame_len 1024 and 16 MB at 2048, so a
- * caller that opens several tracks holds one table per track.
+ * Open a forward transform for frame_len samples (a power of two up to
+ * BINK_AUDIO_MAX_FRAME). Holds 2*frame_len doubles for the FFT plus the
+ * same again for the imaginary part: 64 kB at frame_len 2048.
  */
-float *bink_audio_dct_table(int frame_len);
+BinkAudioDct *bink_audio_dct_open(int frame_len);
+void bink_audio_dct_close(BinkAudioDct *dct);
+/**
+ * coeffs[k] = sum(t = 0..frame_len-1, src[t] * cos(pi/frame_len * (t+0.5) * k)).
+ * Computed with a 2N-point real FFT, so O(N log N) instead of O(N^2).
+ */
+int bink_audio_dct_forward(BinkAudioDct *dct, const float *src,
+                           double *coeffs);
 /**
  * Write one DCT block: the 2-bit marker, then per channel the two float
  * coded coefficients, the band quantizer indices, and the coefficient
@@ -50,7 +58,7 @@ float *bink_audio_dct_table(int frame_len);
  * -1..1 range, the same time-domain block the decoder reconstructs.
  */
 int bink_audio_write_dct_block(BinkBitWriter *bw, const BinkAudioInfo *info,
-                               const float *const out[2], const float *tab);
+                               const float *const out[2], BinkAudioDct *dct);
 void bink_audio_reset(BinkAudio *audio);
 void bink_audio_destroy(BinkAudio *audio);
 int bink_audio_decode(BinkAudio *audio, const unsigned char *data,

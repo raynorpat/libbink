@@ -643,26 +643,74 @@ static int write_float(BinkBitWriter *bw, float value)
     return bink_bw_put(bw, (unsigned)sign, 1);
 }
 
-float *bink_audio_dct_table(int frame_len)
-{
-    float *tab;
-    int k;
-    int t;
+struct BinkAudioDct {
+    int frame_len;
+    double *re;
+    double *im;
+};
 
-    if (frame_len <= 0 || frame_len > BINK_AUDIO_MAX_FRAME)
+BinkAudioDct *bink_audio_dct_open(int frame_len)
+{
+    BinkAudioDct *dct;
+    int n;
+
+    if (frame_len < 2 || frame_len > BINK_AUDIO_MAX_FRAME)
         return NULL;
-    tab = (float *)malloc((size_t)frame_len * (size_t)frame_len *
-                          sizeof(*tab));
-    if (tab == NULL)
+    for (n = 2; n < frame_len; n <<= 1)
+        ;
+    if (n != frame_len)
         return NULL;
-    for (k = 0; k < frame_len; k++) {
-        for (t = 0; t < frame_len; t++) {
-            tab[(size_t)k * (size_t)frame_len + (size_t)t] =
-                (float)cos(M_PI / (double)frame_len *
-                           ((double)t + 0.5) * (double)k);
-        }
+    dct = (BinkAudioDct *)calloc(1, sizeof(*dct));
+    if (dct == NULL)
+        return NULL;
+    dct->frame_len = frame_len;
+    dct->re = (double *)calloc((size_t)frame_len * 2u, sizeof(*dct->re));
+    dct->im = (double *)calloc((size_t)frame_len * 2u, sizeof(*dct->im));
+    if (dct->re == NULL || dct->im == NULL) {
+        bink_audio_dct_close(dct);
+        return NULL;
     }
-    return tab;
+    return dct;
+}
+
+void bink_audio_dct_close(BinkAudioDct *dct)
+{
+    if (dct == NULL)
+        return;
+    free(dct->re);
+    free(dct->im);
+    free(dct);
+}
+
+/*
+ * The DCT-II basis is the real part of a half-bin-shifted 2N-point DFT:
+ *   C[k] = Re( e^(-i*pi*k/(2N)) * FFT_2N(x)[k] )
+ * because FFT_2N(x)[k] = sum(x[n] * e^(-i*pi*k*n/N)) and the exponential
+ * carries the (n + 0.5) offset. One FFT serves every coefficient.
+ */
+int bink_audio_dct_forward(BinkAudioDct *dct, const float *src,
+                           double *coeffs)
+{
+    int n;
+    int i;
+    int k;
+
+    if (dct == NULL || src == NULL || coeffs == NULL)
+        return -1;
+    n = dct->frame_len;
+    for (i = 0; i < n; i++) {
+        dct->re[i] = (double)src[i];
+        dct->im[i] = 0.0;
+    }
+    memset(dct->re + n, 0, (size_t)n * sizeof(*dct->re));
+    memset(dct->im + n, 0, (size_t)n * sizeof(*dct->im));
+    fft_transform(dct->re, dct->im, n * 2, 0);
+    for (k = 0; k < n; k++) {
+        double theta = M_PI * (double)k / (2.0 * (double)n);
+
+        coeffs[k] = dct->re[k] * cos(theta) + dct->im[k] * sin(theta);
+    }
+    return 0;
 }
 
 /* Largest integer a band may use. */
@@ -674,7 +722,7 @@ float *bink_audio_dct_table(int frame_len)
 #define BINK_AUDIO_MASK_FLOOR 12
 
 int bink_audio_write_dct_block(BinkBitWriter *bw, const BinkAudioInfo *info,
-                               const float *const out[2], const float *tab)
+                               const float *const out[2], BinkAudioDct *dct)
 {
     static const unsigned char rle_length[16] = {
         2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15, 16, 32, 64
@@ -686,7 +734,7 @@ int bink_audio_write_dct_block(BinkBitWriter *bw, const BinkAudioInfo *info,
     int floor_q;
     int ch;
 
-    if (bw == NULL || info == NULL || out == NULL || tab == NULL)
+    if (bw == NULL || info == NULL || out == NULL || dct == NULL)
         return -1;
     if (!info->use_dct || info->frame_len <= 0 ||
         info->frame_len > BINK_AUDIO_MAX_FRAME || info->channels < 1 ||
@@ -703,17 +751,10 @@ int bink_audio_write_dct_block(BinkBitWriter *bw, const BinkAudioInfo *info,
 
         if (src == NULL)
             goto fail;
-        for (i = 0; i < info->frame_len; i++) {
-            const float *row = tab + (size_t)i * (size_t)info->frame_len;
-            double sum = 0.0;
-            int t;
-
-            for (t = 0; t < info->frame_len; t++)
-                sum += (double)row[t] * (double)src[t];
-            /* E[0] = C[0] / 2: the DC basis has norm N, every other one
-             * N / 2. */
-            coef[i] = i == 0 ? sum * 0.5 : sum;
-        }
+        if (bink_audio_dct_forward(dct, src, coef) != 0)
+            goto fail;
+        /* E[0] = C[0] / 2: the DC basis has norm N, every other one N / 2. */
+        coef[0] *= 0.5;
         if (write_float(bw, (float)(coef[0] / (double)info->root)) != 0 ||
             write_float(bw, (float)(coef[1] / (double)info->root)) != 0)
             goto fail;

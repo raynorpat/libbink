@@ -1,4 +1,5 @@
 #include "bink.h"
+#include "bink_audio.h"
 #include "bink_dsp.h"
 #include "bink_enc_dct.h"
 #include "bink_enc_image.h"
@@ -1739,6 +1740,62 @@ static int test_audio_rates(void)
     return rc;
 }
 
+/* The FFT-based forward transform against the definition it implements. */
+static int test_audio_dct_forward(void)
+{
+    static const int lens[3] = { 512, 1024, 2048 };
+    int li;
+
+    for (li = 0; li < 3; li++) {
+        int n = lens[li];
+        BinkAudioDct *dct = bink_audio_dct_open(n);
+        float *src = (float *)malloc((size_t)n * sizeof(*src));
+        double *got = (double *)malloc((size_t)n * sizeof(*got));
+        uint32_t seed = 2463534242u;
+        double worst = 0.0;
+        int k;
+        int t;
+
+        if (dct == NULL || src == NULL || got == NULL) {
+            fprintf(stderr, "FAIL audio dct: out of memory\n");
+            bink_audio_dct_close(dct);
+            free(src);
+            free(got);
+            return 1;
+        }
+        for (t = 0; t < n; t++) {
+            seed = seed * 1103515245u + 12345u;
+            src[t] = (float)((int)((seed >> 16) % 2001u) - 1000) / 1000.0f;
+        }
+        if (bink_audio_dct_forward(dct, src, got) != 0) {
+            fprintf(stderr, "FAIL audio dct: forward failed at %d\n", n);
+            bink_audio_dct_close(dct);
+            free(src);
+            free(got);
+            return 1;
+        }
+        for (k = 0; k < n; k++) {
+            double want = 0.0;
+            double diff;
+
+            for (t = 0; t < n; t++)
+                want += (double)src[t] * cos(M_PI / (double)n *
+                                             ((double)t + 0.5) * (double)k);
+            diff = fabs(got[k] - want);
+            if (diff > worst)
+                worst = diff;
+        }
+        bink_audio_dct_close(dct);
+        free(src);
+        free(got);
+        if (worst > 1.0e-6) {
+            fprintf(stderr, "FAIL audio dct: n=%d worst %.3g\n", n, worst);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static int test_audio(void)
 {
     enum { W = 8, H = 8 };
@@ -2388,6 +2445,8 @@ int main(void)
     if (test_audio_stereo_channels() != 0)
         return 1;
     if (test_audio_rates() != 0)
+        return 1;
+    if (test_audio_dct_forward() != 0)
         return 1;
     if (test_failure_keeps_or_removes() != 0)
         return 1;
