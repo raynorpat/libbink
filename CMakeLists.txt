@@ -138,14 +138,28 @@ if(BINK_BUILD_TOOLS)
   else()
     add_executable(bink_sdl_player src/tools/bink_sdl_player.c
                    src/tools/bink_mix.c src/tools/bink_playback.c)
+    add_executable(bink_gl_player src/tools/bink_gl_player.c
+                   src/tools/bink_mix.c src/tools/bink_playback.c)
     bink_set_compile_settings(bink_sdl_player)
+    bink_set_compile_settings(bink_gl_player)
     if(BINK_USE_SDL3)
       target_compile_definitions(bink_sdl_player PRIVATE BINK_USE_SDL3=1)
+      target_compile_definitions(bink_gl_player PRIVATE BINK_USE_SDL3=1)
     elseif(TARGET SDL2::SDL2main)
       target_link_libraries(bink_sdl_player PRIVATE SDL2::SDL2main)
+      target_link_libraries(bink_gl_player PRIVATE SDL2::SDL2main)
     endif()
     target_link_libraries(bink_sdl_player PRIVATE
       ${BINK_LINK_TARGET} ${BINK_SDL_TARGET})
+    target_link_libraries(bink_gl_player PRIVATE
+      ${BINK_LINK_TARGET} ${BINK_SDL_TARGET})
+    if(APPLE)
+      # OpenGL is deprecated on macOS; the API still works and the entry
+      # points are loaded at run time, so only the header warnings are
+      # worth silencing.
+      target_compile_options(bink_gl_player PRIVATE
+        -Wno-deprecated-declarations)
+    endif()
     message(STATUS "bink_sdl_player: linking ${BINK_LINK_TARGET} and ${BINK_SDL_TARGET}")
   endif()
 endif()
