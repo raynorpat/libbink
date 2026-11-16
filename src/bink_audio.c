@@ -665,6 +665,14 @@ float *bink_audio_dct_table(int frame_len)
     return tab;
 }
 
+/* Largest integer a band may use. */
+#define BINK_AUDIO_BAND_TARGET 255.0
+/* How many quantizer steps finer than the frame's loudest band any other
+ * band may go. Without this floor, spectral leakage 60 dB down still gets
+ * the finest step and dominates the file: a pure tone cost 33 kB/s, more
+ * than 250 kbps. 12 steps is about 16 dB. */
+#define BINK_AUDIO_MASK_FLOOR 12
+
 int bink_audio_write_dct_block(BinkBitWriter *bw, const BinkAudioInfo *info,
                                const float *const out[2], const float *tab)
 {
@@ -674,6 +682,7 @@ int bink_audio_write_dct_block(BinkBitWriter *bw, const BinkAudioInfo *info,
     double *coef;
     int *qidx;
     int band_q[25];
+    int floor_q;
     int ch;
 
     if (bw == NULL || info == NULL || out == NULL || tab == NULL)
@@ -710,6 +719,28 @@ int bink_audio_write_dct_block(BinkBitWriter *bw, const BinkAudioInfo *info,
             write_float(bw, (float)(coef[1] / (double)info->root)) != 0)
             goto fail;
 
+        /* Step for the loudest band; quieter bands may not go much finer. */
+        {
+            double peak = 0.0;
+
+            for (i = 2; i < info->frame_len; i++) {
+                double mag = fabs(coef[i]);
+
+                if (mag > peak)
+                    peak = mag;
+            }
+            floor_q = 0;
+            if (peak > 0.0) {
+                while (floor_q < 95 &&
+                       peak / (double)info->quant[floor_q] >
+                           BINK_AUDIO_BAND_TARGET)
+                    floor_q++;
+            }
+            floor_q -= BINK_AUDIO_MASK_FLOOR;
+            if (floor_q < 0)
+                floor_q = 0;
+        }
+
         /* One quantizer per band, sized to that band's loudest coefficient. */
         for (b = 0; b < info->num_bands; b++) {
             int hi = b + 1 < info->num_bands ? (int)info->bands[b + 1]
@@ -729,9 +760,12 @@ int bink_audio_write_dct_block(BinkBitWriter *bw, const BinkAudioInfo *info,
                     maxabs = mag;
             }
             if (maxabs > 0.0) {
-                while (q < 95 && maxabs / (double)info->quant[q] > 1023.0)
+                while (q < 95 &&
+                       maxabs / (double)info->quant[q] > BINK_AUDIO_BAND_TARGET)
                     q++;
             }
+            if (q < floor_q)
+                q = floor_q;
             band_q[b] = q;
             if (bink_bw_put(bw, (unsigned)q, 8) != 0)
                 goto fail;

@@ -58,8 +58,10 @@ Each audio track is Bink DCT (`flags` `0x1000`, plus `0x2000` when stereo).
 `bink_build` writes one track. The library accepts up to seven.
 Each block carries a full DCT coefficient set: the forward transform
 inverts the decoder's `dct_iii`, the encoder chooses one quantizer index
-per band (the smallest that keeps the band's loudest coefficient within
-10 bits), and long zero spans collapse into single run-length chunks.
+per band (the smallest that keeps the band's loudest coefficient at 255,
+and never more than 12 steps finer than the frame's loudest band, so
+spectral leakage does not dominate the file), and long zero spans collapse
+into single run-length chunks. A mono 44.1 kHz track runs around 50 kbps.
 The overlap tail is filled with the next block's samples, so the
 decoder's crossfade reproduces the source exactly before quantization.
 RDFT is not written.

@@ -1417,9 +1417,9 @@ static int test_audio_size(void)
         fprintf(stderr, "FAIL audio size: no output file\n");
         goto done;
     }
-    /* Regression guard only: per-band coding spends bits on the tone's
-     * spectral leakage, which measures about 32.9 kB for this signal. */
-    if (st.st_size >= 40000) {
+    /* A quarter of the raw PCM: the per-band target must keep a tone's
+     * spectral leakage from dominating the file. */
+    if (st.st_size >= (off_t)(clip.samples * 2 / 4)) {
         fprintf(stderr, "FAIL audio size: %ld bytes for %zu samples\n",
                 (long)st.st_size, clip.samples);
         goto done;
