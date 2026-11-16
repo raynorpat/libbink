@@ -1,25 +1,16 @@
 #ifndef BINK_PLAYBACK_H
 #define BINK_PLAYBACK_H
 
-/* Audio output and seek glue shared by the SDL and OpenGL players. */
+/* Audio output and seek glue shared by every player. The device layer is
+ * provided per backend by bink_playback_sdl.c or bink_playback_win32.c. */
 
 #include "bink.h"
-
-#ifdef BINK_USE_SDL3
-#include <SDL3/SDL.h>
-#else
-#include <SDL.h>
-#endif
 
 typedef struct {
     int ready;
     int rate;
     int channels;
-#ifdef BINK_USE_SDL3
-    SDL_AudioStream *stream;
-#else
-    SDL_AudioDeviceID device;
-#endif
+    void *device; /* backend context */
 } BinkPlayback;
 
 int bink_playback_audio_subsystem(void);
