@@ -45,8 +45,9 @@ cmake -S . -B build -DBINK_BUILD_TOOLS=ON
 cmake --build build
 ```
 
-Requires CMake 3.16 or newer and a C99 compiler. The SDL player is optional
-and built only when an SDL3 or SDL2 CMake package is available.
+Requires CMake 3.16 or newer and a C99 compiler. The players are optional
+and built only when an SDL3 or SDL2 CMake package is available; the OpenGL
+one also needs a GL 3.2 driver at run time.
 
 Options:
 
@@ -85,6 +86,12 @@ Full documentation is in `docs/usage.md`.
 - `bink_sdl_player video.bik` - SDL3 (preferred) or SDL2 playback.
   Enables every audio track and mixes them. Esc/Q quits, Space pauses the
   picture and the sound, Left/Right seek one second.
+- `bink_gl_player video.bik` - the same controls on an OpenGL 3.2 window.
+  The YUV to RGB conversion runs in a GLSL shader, and `M` switches to a
+  second shader that interpolates between decoded frames using the
+  decoder's motion vectors, so motion looks smoother than the source
+  rate. Needs SDL and a GL 3.2 driver; the player itself runs only when a
+  display is available.
 - `bink_dump [--frames N] video.bik [outdir]` - headless PPM frame dump and
   checksums. Writes `frame_%05u.ppm` (P6) files.
 - `bink_build <images> [-o out.bik]` - encode a directory of PPM, BMP, PNG, or JPEG frames,
