@@ -143,6 +143,7 @@ if(BINK_BUILD_TOOLS)
                    src/tools/bink_mix.c src/tools/bink_playback.c
                    src/tools/bink_playback_sdl.c)
     add_executable(bink_sdlgl_player src/tools/bink_sdlgl_player.c
+                   src/tools/bink_gl_renderer.c src/tools/bink_sdl_player_core.c
                    src/tools/bink_mix.c src/tools/bink_playback.c
                    src/tools/bink_playback_sdl.c)
     bink_set_compile_settings(bink_sdl_player)
