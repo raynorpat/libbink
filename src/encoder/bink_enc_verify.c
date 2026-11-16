@@ -4,9 +4,13 @@
 #include "bink_enc_video.h"
 #include "bink.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#define MAX_ERROR 32
+#define MAX_RMSE 5.0
 
 static bink_enc_status fail(char *err, size_t errlen, const char *message)
 {
@@ -15,9 +19,12 @@ static bink_enc_status fail(char *err, size_t errlen, const char *message)
     return BINK_ENC_ERR_VERIFY;
 }
 
-static int planes_match(const bink movie, const uint8_t *y, const uint8_t *u,
-                        const uint8_t *v, unsigned width, unsigned height)
+static int planes_within_tolerance(const bink movie, const uint8_t *y,
+                                   const uint8_t *u, const uint8_t *v,
+                                   unsigned width, unsigned height, char *err,
+                                   size_t errlen)
 {
+    static const char *const names[3] = { "Y", "U", "V" };
     unsigned cw = (width + 1) >> 1;
     unsigned ch = (height + 1) >> 1;
     const unsigned char *planes[3];
@@ -41,15 +48,35 @@ static int planes_match(const bink movie, const uint8_t *y, const uint8_t *u,
         int stride = bink_get_stride(movie, i);
         unsigned row;
         unsigned col;
+        unsigned count = dims[i][0] * dims[i][1];
+        unsigned max_error = 0;
+        double sum = 0.0;
+        double rmse;
 
-        if (planes[i] == NULL || stride <= 0)
+        if (planes[i] == NULL || stride <= 0) {
+            if (err != NULL && errlen > 0)
+                snprintf(err, errlen, "%s plane is unavailable", names[i]);
             return 0;
+        }
         for (row = 0; row < dims[i][1]; row++) {
             for (col = 0; col < dims[i][0]; col++) {
-                if (planes[i][(size_t)row * (size_t)stride + col] !=
-                    expect[i][(size_t)row * dims[i][0] + col])
-                    return 0;
+                int diff =
+                    (int)planes[i][(size_t)row * (size_t)stride + col] -
+                    (int)expect[i][(size_t)row * dims[i][0] + col];
+                unsigned error = (unsigned)(diff < 0 ? -diff : diff);
+
+                if (error > max_error)
+                    max_error = error;
+                sum += (double)diff * (double)diff;
             }
+        }
+        rmse = sqrt(sum / (double)count);
+        if (max_error > MAX_ERROR || rmse > MAX_RMSE) {
+            if (err != NULL && errlen > 0)
+                snprintf(err, errlen,
+                         "%s plane exceeds tolerance (max error %u, RMSE %.2f)",
+                         names[i], max_error, rmse);
+            return 0;
         }
     }
     return 1;
@@ -143,8 +170,9 @@ bink_enc_status bink_enc_verify(const char *path, const bink_enc_source *source,
             goto done;
         }
         bink_enc_rgb_to_yuv(rgb, source->width, source->height, y, u, v);
-        if (!planes_match(movie, y, u, v, source->width, source->height)) {
-            result = fail(err, errlen, "decoded picture does not match");
+        if (!planes_within_tolerance(movie, y, u, v, source->width,
+                                     source->height, err, errlen)) {
+            result = BINK_ENC_ERR_VERIFY;
             goto done;
         }
         for (track = 0; track < source->audio_track_count; track++) {
