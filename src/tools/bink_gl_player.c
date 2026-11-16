@@ -5,14 +5,24 @@
  *   cmake -S . -B build -DBINK_BUILD_TOOLS=ON
  *   cmake --build build
  *
- * The window uses an OpenGL 3.2 core profile and presents through a
- * GLSL shader that converts the decoded YUV planes to RGB on the GPU.
+ * The window uses an OpenGL 3.2 core profile. Two shaders present the
+ * decoded planes:
+ *   presentation - YUV to RGB on the GPU
+ *   interpolation - motion-compensated blend between two decoded frames,
+ *                   warped by the decoder's own per-block vectors
  *
  * Usage:
  *   bink_gl_player file.bik
  *
  * Keys: Esc/q quit, Space pauses the picture and the sound,
- * Left/Right seek one second.
+ *       Left/Right seek one second, M toggles interpolation.
+ *
+ * Test hooks, all optional environment variables:
+ *   BINK_GL_TEST_FRAMES=N  exit after N decoded frames
+ *   BINK_GL_SHADER=present|interp  start with that shader
+ *   BINK_GL_T=0..1         force the blend factor (implies interp)
+ *   BINK_GL_DUMP=path.ppm  write one frame, compare it with the decoder's
+ *                          own RGB, and exit
  */
 
 #include "bink.h"
@@ -27,6 +37,7 @@
 #define BINK_EVENT_KEY_DOWN SDL_EVENT_KEY_DOWN
 #define BINK_EVENT_KEY(event) ((event).key.key)
 #define BINK_KEY_Q SDLK_Q
+#define BINK_KEY_M SDLK_M
 #define BINK_GL_DELETE_CONTEXT SDL_GL_DestroyContext
 #else
 #include <SDL.h>
@@ -35,6 +46,7 @@
 #define BINK_EVENT_KEY_DOWN SDL_KEYDOWN
 #define BINK_EVENT_KEY(event) ((event).key.keysym.sym)
 #define BINK_KEY_Q SDLK_q
+#define BINK_KEY_M SDLK_m
 #define BINK_GL_DELETE_CONTEXT SDL_GL_DeleteContext
 #endif
 
@@ -74,6 +86,7 @@ typedef GLint (APIENTRYP BINK_PFN_glGetUniformLocation)(GLuint, const char *);
 typedef void (APIENTRYP BINK_PFN_glUniform1i)(GLint, GLint);
 typedef void (APIENTRYP BINK_PFN_glUniform1f)(GLint, GLfloat);
 typedef void (APIENTRYP BINK_PFN_glUniform2f)(GLint, GLfloat, GLfloat);
+typedef void (APIENTRYP BINK_PFN_glUniform2i)(GLint, GLint, GLint);
 typedef void (APIENTRYP BINK_PFN_glUniform3f)(GLint, GLfloat, GLfloat, GLfloat);
 typedef void (APIENTRYP BINK_PFN_glUniformMatrix3fv)(GLint, GLsizei, GLboolean,
                                                      const GLfloat *);
@@ -118,6 +131,7 @@ typedef struct {
     BINK_PFN_glUniform1i Uniform1i;
     BINK_PFN_glUniform1f Uniform1f;
     BINK_PFN_glUniform2f Uniform2f;
+    BINK_PFN_glUniform2i Uniform2i;
     BINK_PFN_glUniform3f Uniform3f;
     BINK_PFN_glUniformMatrix3fv UniformMatrix3fv;
     BINK_PFN_glGenVertexArrays GenVertexArrays;
@@ -135,6 +149,24 @@ typedef struct {
 } BinkGL;
 
 static BinkGL gl;
+
+/* BT.601 limited range, column-major, and the offset that folds in the
+ * 16 and 128 black levels. */
+static const GLfloat yuv_matrix[9] = {
+    1.164f, 1.164f, 1.164f,
+    0.0f, -0.392f, 2.017f,
+    1.596f, -0.813f, 0.0f
+};
+
+static void yuv_offset(GLfloat out[3])
+{
+    const GLfloat y0 = 16.0f / 255.0f;
+    const GLfloat c0 = 128.0f / 255.0f;
+
+    out[0] = -1.164f * y0 - 1.596f * c0;
+    out[1] = -1.164f * y0 + 0.392f * c0 + 0.813f * c0;
+    out[2] = -1.164f * y0 - 2.017f * c0;
+}
 
 static void *load_symbol(const char *name)
 {
@@ -154,11 +186,6 @@ static void *load_symbol(const char *name)
 
 static int gl_load(void)
 {
-    if (!SDL_GL_ExtensionSupported("GL_ARB_texture_rg") &&
-        !SDL_GL_ExtensionSupported("GL_EXT_texture_rg")) {
-        /* Core in 3.0, so a 3.2 context always has it; the check only
-         * catches a driver that lied about its version. */
-    }
     LOAD(GenTextures, glGenTextures);
     LOAD(BindTexture, glBindTexture);
     LOAD(TexImage2D, glTexImage2D);
@@ -181,6 +208,7 @@ static int gl_load(void)
     LOAD(Uniform1i, glUniform1i);
     LOAD(Uniform1f, glUniform1f);
     LOAD(Uniform2f, glUniform2f);
+    LOAD(Uniform2i, glUniform2i);
     LOAD(Uniform3f, glUniform3f);
     LOAD(UniformMatrix3fv, glUniformMatrix3fv);
     LOAD(GenVertexArrays, glGenVertexArrays);
@@ -253,7 +281,7 @@ static GLuint link_program(const char *fragment, const char *what)
     return program;
 }
 
-static GLuint make_plane_texture(unsigned width, unsigned height)
+static GLuint make_texture(GLenum internal, unsigned width, unsigned height)
 {
     GLuint texture = 0;
 
@@ -263,8 +291,9 @@ static GLuint make_plane_texture(unsigned width, unsigned height)
     gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    gl.TexImage2D(GL_TEXTURE_2D, 0, GL_R8, (GLsizei)width, (GLsizei)height, 0,
-                  GL_RED, GL_UNSIGNED_BYTE, NULL);
+    gl.TexImage2D(GL_TEXTURE_2D, 0, (GLint)internal, (GLsizei)width,
+                  (GLsizei)height, 0, internal == GL_RG8 ? GL_RG : GL_RED,
+                  GL_UNSIGNED_BYTE, NULL);
     return texture;
 }
 
@@ -279,11 +308,82 @@ static void upload_plane(GLuint texture, const unsigned char *data,
     gl.PixelStorei(GL_UNPACK_ROW_LENGTH, 0);
 }
 
-/* Read back the dump and print the mean absolute difference against the
- * decoder's own packed RGB, at the dump's resolution by nearest sampling. */
-static void compare_dump(bink object, const char *path, int dw, int dh)
+/* One YUV texture set: slots[0] = Y, [1] = U, [2] = V. */
+static void upload_frame(GLuint slots[3], bink object, unsigned long w,
+                         unsigned long h)
 {
-    const unsigned char *rgb = bink_get_video(object);
+    const unsigned char *y = bink_get_plane(object, BINK_PLANE_Y);
+    const unsigned char *u = bink_get_plane(object, BINK_PLANE_U);
+    const unsigned char *v = bink_get_plane(object, BINK_PLANE_V);
+
+    if (y == NULL || u == NULL || v == NULL)
+        return;
+    upload_plane(slots[0], y, (unsigned)w, (unsigned)h,
+                 bink_get_stride(object, BINK_PLANE_Y));
+    upload_plane(slots[1], u, (unsigned)((w + 1) / 2),
+                 (unsigned)((h + 1) / 2), bink_get_stride(object, BINK_PLANE_U));
+    upload_plane(slots[2], v, (unsigned)((w + 1) / 2),
+                 (unsigned)((h + 1) / 2), bink_get_stride(object, BINK_PLANE_V));
+}
+
+/* Upload a frame and remember its packed RGB, which the dump mode compares
+ * against. */
+static void upload_slot(GLuint slots[3], unsigned char *rgb, bink object,
+                        unsigned long w, unsigned long h)
+{
+    const unsigned char *packed;
+
+    upload_frame(slots, object, w, h);
+    packed = bink_get_video(object);
+    if (packed != NULL)
+        memcpy(rgb, packed, (size_t)w * (size_t)h * 3u);
+}
+
+/* The frame's motion field as RG8, one texel per 8x8 luma block. */
+static void upload_motion(GLuint texture, bink object,
+                          unsigned long *blocks_w, unsigned long *blocks_h)
+{
+    const signed char *mx = NULL;
+    const signed char *my = NULL;
+    unsigned long bw = 0;
+    unsigned long bh = 0;
+    unsigned char *texels;
+    unsigned long i;
+
+    *blocks_w = 0;
+    *blocks_h = 0;
+    if (!bink_get_motion(object, &bw, &bh, &mx, &my) || bw == 0 || bh == 0)
+        return;
+    texels = (unsigned char *)malloc((size_t)bw * (size_t)bh * 2u);
+    if (texels == NULL)
+        return;
+    for (i = 0; i < bw * bh; i++) {
+        texels[i * 2u] = (unsigned char)((int)mx[i] + 128);
+        texels[i * 2u + 1u] = (unsigned char)((int)my[i] + 128);
+    }
+    gl.BindTexture(GL_TEXTURE_2D, texture);
+    gl.PixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    gl.PixelStorei(GL_UNPACK_ROW_LENGTH, (int)bw);
+    gl.TexImage2D(GL_TEXTURE_2D, 0, GL_RG8, (GLsizei)bw, (GLsizei)bh, 0, GL_RG,
+                  GL_UNSIGNED_BYTE, texels);
+    gl.PixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    free(texels);
+    *blocks_w = bw;
+    *blocks_h = bh;
+}
+
+static void wait_until(double target_ms)
+{
+    double now = (double)SDL_GetTicks();
+
+    if (target_ms > now)
+        SDL_Delay((Uint32)(target_ms - now + 0.999));
+}
+
+/* Compare a framebuffer dump against the decoder's own packed RGB. */
+static void compare_dump(const unsigned char *rgb, const char *path, int dw,
+                         int dh)
+{
     FILE *fp = fopen(path, "rb");
     unsigned long w = 0;
     unsigned long h = 0;
@@ -312,7 +412,6 @@ static void compare_dump(bink object, const char *path, int dw, int dh)
         return;
     }
     fclose(fp);
-    /* The dump is at drawable resolution; the source is plane resolution. */
     {
         unsigned long i;
 
@@ -320,8 +419,7 @@ static void compare_dump(bink object, const char *path, int dw, int dh)
             unsigned long x = i % (unsigned long)dw;
             unsigned long y2 = i / (unsigned long)dw;
             unsigned long sx = x * w / (unsigned long)dw;
-            /* The dump was flipped on write, so row 0 in the file is the
-             * top of the picture while GL row 0 is the bottom. */
+            /* The dump is flipped on write, so file row 0 is the top. */
             unsigned long sy =
                 ((unsigned long)dh - 1ul - y2) * h / (unsigned long)dh;
             int c;
@@ -343,13 +441,43 @@ static void compare_dump(bink object, const char *path, int dw, int dh)
     free(pix);
 }
 
-
-static void wait_until(double target_ms)
+static int dump_framebuffer(const char *path, int dw, int dh)
 {
-    double now = (double)SDL_GetTicks();
+    unsigned char *pixels =
+        (unsigned char *)malloc((size_t)dw * (size_t)dh * 4u);
+    FILE *fp = fopen(path, "wb");
+    int ok = 0;
 
-    if (target_ms > now)
-        SDL_Delay((Uint32)(target_ms - now + 0.999));
+    if (pixels == NULL || fp == NULL) {
+        free(pixels);
+        if (fp != NULL)
+            fclose(fp);
+        return 0;
+    }
+    gl.ReadPixels(0, 0, (GLsizei)dw, (GLsizei)dh, GL_RGBA, GL_UNSIGNED_BYTE,
+                  pixels);
+    fprintf(fp, "P6\n%d %d\n255\n", dw, dh);
+    {
+        int i;
+
+        for (i = dh - 1; i >= 0; i--) {
+            const unsigned char *row = pixels + (size_t)i * (size_t)dw * 4u;
+            int x;
+
+            for (x = 0; x < dw; x++) {
+                unsigned char rgb[3];
+
+                rgb[0] = row[x * 4 + 0];
+                rgb[1] = row[x * 4 + 1];
+                rgb[2] = row[x * 4 + 2];
+                fwrite(rgb, 1, 3, fp);
+            }
+        }
+    }
+    fclose(fp);
+    free(pixels);
+    ok = 1;
+    return ok;
 }
 
 int main(int argc, char **argv)
@@ -358,15 +486,15 @@ int main(int argc, char **argv)
     bink b;
     SDL_Window *window = NULL;
     SDL_GLContext context = NULL;
-    GLuint program = 0;
+    GLuint program_present = 0;
+    GLuint program_interp = 0;
     GLuint vao = 0;
     GLuint vbo = 0;
-    GLuint textures[3] = { 0, 0, 0 };
-    GLint u_y = -1;
-    GLint u_u = -1;
-    GLint u_v = -1;
-    GLint u_matrix = -1;
-    GLint u_offset = -1;
+    GLuint tex[2][3];
+    unsigned char *slot_rgb[2];
+    GLuint mv_tex = 0;
+    unsigned long blocks_w = 0;
+    unsigned long blocks_h = 0;
     unsigned long w = 0;
     unsigned long h = 0;
     unsigned long frames = 0;
@@ -386,13 +514,42 @@ int main(int argc, char **argv)
     int paused = 0;
     int device_paused = 0;
     int exit_code = 0;
-    double next_due = 0.0;
-    double picture_ms = 0.0;
+    double frame_ms = 0.0;
+    double start_ms = 0.0;
+    float t = 0.0f;
+    int interp = 1;
+    int cur = 0;
+    int has_next = 0;
     int drawable_w = 0;
     int drawable_h = 0;
     const char *dump_path = getenv("BINK_GL_DUMP");
+    const char *force_shader = getenv("BINK_GL_SHADER");
+    const char *force_t = getenv("BINK_GL_T");
+    GLint p_y = -1;
+    GLint p_u = -1;
+    GLint p_v = -1;
+    GLint p_matrix = -1;
+    GLint p_offset = -1;
+    GLint i_y0 = -1;
+    GLint i_u0 = -1;
+    GLint i_v0 = -1;
+    GLint i_y1 = -1;
+    GLint i_u1 = -1;
+    GLint i_v1 = -1;
+    GLint i_mv = -1;
+    GLint i_matrix = -1;
+    GLint i_offset = -1;
+    GLint i_luma = -1;
+    GLint i_chroma = -1;
+    GLint i_blocks = -1;
+    GLint i_t = -1;
     int i;
 
+    memset(tex, 0, sizeof(tex));
+    slot_rgb[0] = NULL;
+    slot_rgb[1] = NULL;
+    if (force_shader != NULL && strcmp(force_shader, "present") == 0)
+        interp = 0;
     if (argc != 2) {
         fprintf(stderr, "Usage: %s file.bik\n", argv[0]);
         return 1;
@@ -425,6 +582,7 @@ int main(int argc, char **argv)
     }
     if (usf <= 0.0)
         usf = 1000000.0 / 30.0;
+    frame_ms = usf / 1000.0;
 
     memset(enabled, 0, sizeof(enabled));
     memset(&audio, 0, sizeof(audio));
@@ -498,16 +656,30 @@ int main(int argc, char **argv)
         goto done;
     }
 
-    program = link_program(bink_gl_fs_present, "presentation");
-    if (program == 0) {
+    program_present = link_program(bink_gl_fs_present, "presentation");
+    program_interp = link_program(bink_gl_fs_interpolate, "interpolation");
+    if (program_present == 0 || program_interp == 0) {
         exit_code = 1;
         goto done;
     }
-    u_y = gl.GetUniformLocation(program, "u_y");
-    u_u = gl.GetUniformLocation(program, "u_u");
-    u_v = gl.GetUniformLocation(program, "u_v");
-    u_matrix = gl.GetUniformLocation(program, "u_yuv_to_rgb");
-    u_offset = gl.GetUniformLocation(program, "u_offset");
+    p_y = gl.GetUniformLocation(program_present, "u_y");
+    p_u = gl.GetUniformLocation(program_present, "u_u");
+    p_v = gl.GetUniformLocation(program_present, "u_v");
+    p_matrix = gl.GetUniformLocation(program_present, "u_yuv_to_rgb");
+    p_offset = gl.GetUniformLocation(program_present, "u_offset");
+    i_y0 = gl.GetUniformLocation(program_interp, "u_y0");
+    i_u0 = gl.GetUniformLocation(program_interp, "u_u0");
+    i_v0 = gl.GetUniformLocation(program_interp, "u_v0");
+    i_y1 = gl.GetUniformLocation(program_interp, "u_y1");
+    i_u1 = gl.GetUniformLocation(program_interp, "u_u1");
+    i_v1 = gl.GetUniformLocation(program_interp, "u_v1");
+    i_mv = gl.GetUniformLocation(program_interp, "u_mv");
+    i_matrix = gl.GetUniformLocation(program_interp, "u_yuv_to_rgb");
+    i_offset = gl.GetUniformLocation(program_interp, "u_offset");
+    i_luma = gl.GetUniformLocation(program_interp, "u_luma_size");
+    i_chroma = gl.GetUniformLocation(program_interp, "u_chroma_size");
+    i_blocks = gl.GetUniformLocation(program_interp, "u_blocks");
+    i_t = gl.GetUniformLocation(program_interp, "u_t");
 
     {
         static const GLfloat quad[] = {
@@ -526,13 +698,29 @@ int main(int argc, char **argv)
                                (const void *)0);
     }
 
-    textures[0] = make_plane_texture((unsigned)w, (unsigned)h);
-    textures[1] = make_plane_texture((unsigned)((w + 1) / 2),
-                                     (unsigned)((h + 1) / 2));
-    textures[2] = make_plane_texture((unsigned)((w + 1) / 2),
-                                     (unsigned)((h + 1) / 2));
-    if (textures[0] == 0 || textures[1] == 0 || textures[2] == 0) {
-        fprintf(stderr, "Cannot create the plane textures.\n");
+    for (i = 0; i < 2; i++) {
+        tex[i][0] = make_texture(GL_R8, (unsigned)w, (unsigned)h);
+        tex[i][1] = make_texture(GL_R8, (unsigned)((w + 1) / 2),
+                                 (unsigned)((h + 1) / 2));
+        tex[i][2] = make_texture(GL_R8, (unsigned)((w + 1) / 2),
+                                 (unsigned)((h + 1) / 2));
+        if (tex[i][0] == 0 || tex[i][1] == 0 || tex[i][2] == 0) {
+            fprintf(stderr, "Cannot create the plane textures.\n");
+            exit_code = 1;
+            goto done;
+        }
+    }
+    slot_rgb[0] = (unsigned char *)malloc((size_t)w * (size_t)h * 3u);
+    slot_rgb[1] = (unsigned char *)malloc((size_t)w * (size_t)h * 3u);
+    if (slot_rgb[0] == NULL || slot_rgb[1] == NULL) {
+        fprintf(stderr, "Cannot allocate the frame buffers.\n");
+        exit_code = 1;
+        goto done;
+    }
+    mv_tex = make_texture(GL_RG8, (unsigned)((w + 7) / 8),
+                          (unsigned)((h + 7) / 8));
+    if (mv_tex == 0) {
+        fprintf(stderr, "Cannot create the motion texture.\n");
         exit_code = 1;
         goto done;
     }
@@ -559,25 +747,29 @@ int main(int argc, char **argv)
         exit_code = 1;
         goto done;
     }
+    upload_slot(tex[cur], slot_rgb[cur], b, w, h);
     bink_playback_publish(b, enabled, channels, rates, &audio, &audio_bytes);
     if (audio.ready)
         bink_playback_set_paused(&audio, 0, &device_paused);
+
+    start_ms = (double)SDL_GetTicks();
+    if (status == BINK_MORE) {
+        status = bink_next(b);
+        if (status == BINK_MORE || status == BINK_LAST) {
+            upload_slot(tex[1], slot_rgb[1], b, w, h);
+            upload_motion(mv_tex, b, &blocks_w, &blocks_h);
+            has_next = 1;
+        }
+    }
 
     printf("Opened file %s\nWidth: %lu\nHeight: %lu\nFrames: %lu\nFPS: %f\n",
            path, w, h, frames, 1000000.0 / usf);
     fflush(stdout);
 
-    snprintf(title, sizeof(title), "bink_gl_player - %s - presentation", path);
-
     for (;;) {
         SDL_Event event;
         double now;
-        const unsigned char *y;
-        const unsigned char *u;
-        const unsigned char *v;
-        int stride_y;
-        int stride_u;
-        int stride_v;
+        int advanced = 0;
 
         while (SDL_PollEvent(&event)) {
             int key;
@@ -594,146 +786,163 @@ int main(int argc, char **argv)
             } else if (key == SDLK_SPACE) {
                 paused = !paused;
                 bink_playback_set_paused(&audio, paused, &device_paused);
+            } else if (key == BINK_KEY_M) {
+                interp = !interp;
+                snprintf(title, sizeof(title), "bink_gl_player - %s - %s",
+                         path, interp ? "interpolation" : "presentation");
+                SDL_SetWindowTitle(window, title);
             } else if (key == SDLK_LEFT || key == SDLK_RIGHT) {
-                unsigned long cur = 0;
+                unsigned long cur_frame = 0;
                 unsigned long step;
                 long target;
 
-                bink_info_all(b, &cur, &frames, NULL);
+                bink_info_all(b, &cur_frame, &frames, NULL);
                 step = (unsigned long)(1000000.0 / usf + 0.5);
                 if (step < 1)
                     step = 1;
-                target = (long)cur + (key == SDLK_LEFT ? -(long)step
-                                                      : (long)step);
+                target = (long)cur_frame +
+                         (key == SDLK_LEFT ? -(long)step : (long)step);
                 if (target < 0)
                     target = 0;
                 if (frames > 0 && target >= (long)frames)
                     target = (long)frames - 1;
                 if (bink_playback_seek(b, (unsigned long)target, &status,
                                        &audio, usf, enabled, channels,
-                                       rates) == 0)
-                    next_due = 0.0;
+                                       rates) == 0) {
+                    upload_slot(tex[cur], slot_rgb[cur], b, w, h);
+                    has_next = 0;
+                    start_ms = (double)SDL_GetTicks();
+                    t = 0.0f;
+                }
             }
         }
         if (quit)
             break;
 
-        y = bink_get_plane(b, BINK_PLANE_Y);
-        u = bink_get_plane(b, BINK_PLANE_U);
-        v = bink_get_plane(b, BINK_PLANE_V);
-        stride_y = bink_get_stride(b, BINK_PLANE_Y);
-        stride_u = bink_get_stride(b, BINK_PLANE_U);
-        stride_v = bink_get_stride(b, BINK_PLANE_V);
-        if (y != NULL && u != NULL && v != NULL) {
-            upload_plane(textures[0], y, (unsigned)w, (unsigned)h, stride_y);
-            upload_plane(textures[1], u, (unsigned)((w + 1) / 2),
-                         (unsigned)((h + 1) / 2), stride_u);
-            upload_plane(textures[2], v, (unsigned)((w + 1) / 2),
-                         (unsigned)((h + 1) / 2), stride_v);
+        now = (double)SDL_GetTicks();
+        if (force_t != NULL) {
+            t = (float)atof(force_t);
+            if (t < 0.0f)
+                t = 0.0f;
+            if (t > 1.0f)
+                t = 1.0f;
+            if (!interp && dump_path != NULL)
+                interp = 1;
+        } else if (!paused && has_next) {
+            double elapsed = now - start_ms;
+
+            if (frame_ms > 0.0)
+                t = (float)(elapsed / frame_ms);
+            if (t >= 1.0f) {
+                t = 0.0f;
+                advanced = 1;
+            }
+        } else if (!has_next) {
+            t = 0.0f;
         }
 
         gl.Viewport(0, 0, (GLsizei)drawable_w, (GLsizei)drawable_h);
         gl.ClearColor(0.0f, 0.0f, 0.0f, 1.0f);
         gl.Clear(GL_COLOR_BUFFER_BIT);
-        gl.UseProgram(program);
-        gl.ActiveTexture(GL_TEXTURE0);
-        gl.BindTexture(GL_TEXTURE_2D, textures[0]);
-        gl.ActiveTexture(GL_TEXTURE1);
-        gl.BindTexture(GL_TEXTURE_2D, textures[1]);
-        gl.ActiveTexture(GL_TEXTURE2);
-        gl.BindTexture(GL_TEXTURE_2D, textures[2]);
-        gl.Uniform1i(u_y, 0);
-        gl.Uniform1i(u_u, 1);
-        gl.Uniform1i(u_v, 2);
-        {
-            /* BT.601 limited range, column-major for GL. */
-            static const GLfloat m[9] = {
-                1.164f, 1.164f, 1.164f,
-                0.0f, -0.392f, 2.017f,
-                1.596f, -0.813f, 0.0f
-            };
-            const GLfloat y0 = 16.0f / 255.0f;
-            const GLfloat c0 = 128.0f / 255.0f;
-
-            gl.UniformMatrix3fv(u_matrix, 1, GL_FALSE, m);
-            gl.Uniform3f(u_offset, -1.164f * y0 - 1.596f * c0,
-                         -1.164f * y0 + 0.392f * c0 + 0.813f * c0,
-                         -1.164f * y0 - 2.017f * c0);
-        }
         gl.BindVertexArray(vao);
+        if (interp && has_next) {
+            GLfloat offset[3];
+            int next = cur ^ 1;
+
+            gl.UseProgram(program_interp);
+            gl.ActiveTexture(GL_TEXTURE0);
+            gl.BindTexture(GL_TEXTURE_2D, tex[cur][0]);
+            gl.ActiveTexture(GL_TEXTURE1);
+            gl.BindTexture(GL_TEXTURE_2D, tex[cur][1]);
+            gl.ActiveTexture(GL_TEXTURE2);
+            gl.BindTexture(GL_TEXTURE_2D, tex[cur][2]);
+            gl.ActiveTexture(GL_TEXTURE3);
+            gl.BindTexture(GL_TEXTURE_2D, tex[next][0]);
+            gl.ActiveTexture(GL_TEXTURE4);
+            gl.BindTexture(GL_TEXTURE_2D, tex[next][1]);
+            gl.ActiveTexture(GL_TEXTURE5);
+            gl.BindTexture(GL_TEXTURE_2D, tex[next][2]);
+            gl.ActiveTexture(GL_TEXTURE6);
+            gl.BindTexture(GL_TEXTURE_2D, mv_tex);
+            gl.Uniform1i(i_y0, 0);
+            gl.Uniform1i(i_u0, 1);
+            gl.Uniform1i(i_v0, 2);
+            gl.Uniform1i(i_y1, 3);
+            gl.Uniform1i(i_u1, 4);
+            gl.Uniform1i(i_v1, 5);
+            gl.Uniform1i(i_mv, 6);
+            yuv_offset(offset);
+            gl.UniformMatrix3fv(i_matrix, 1, GL_FALSE, yuv_matrix);
+            gl.Uniform3f(i_offset, offset[0], offset[1], offset[2]);
+            gl.Uniform2f(i_luma, (GLfloat)w, (GLfloat)h);
+            gl.Uniform2f(i_chroma, (GLfloat)((w + 1) / 2),
+                         (GLfloat)((h + 1) / 2));
+            gl.Uniform2i(i_blocks, (GLint)(blocks_w > 0 ? blocks_w : 1),
+                         (GLint)(blocks_h > 0 ? blocks_h : 1));
+            gl.Uniform1f(i_t, t);
+        } else {
+            GLfloat offset[3];
+
+            gl.UseProgram(program_present);
+            gl.ActiveTexture(GL_TEXTURE0);
+            gl.BindTexture(GL_TEXTURE_2D, tex[cur][0]);
+            gl.ActiveTexture(GL_TEXTURE1);
+            gl.BindTexture(GL_TEXTURE_2D, tex[cur][1]);
+            gl.ActiveTexture(GL_TEXTURE2);
+            gl.BindTexture(GL_TEXTURE_2D, tex[cur][2]);
+            gl.Uniform1i(p_y, 0);
+            gl.Uniform1i(p_u, 1);
+            gl.Uniform1i(p_v, 2);
+            yuv_offset(offset);
+            gl.UniformMatrix3fv(p_matrix, 1, GL_FALSE, yuv_matrix);
+            gl.Uniform3f(p_offset, offset[0], offset[1], offset[2]);
+        }
         gl.DrawArrays(GL_TRIANGLES, 0, 6);
         if (dump_path != NULL) {
-            unsigned char *pixels = (unsigned char *)malloc(
-                (size_t)drawable_w * (size_t)drawable_h * 4u);
-            FILE *fp = fopen(dump_path, "wb");
-            int wrote_dump = 0;
+            if (dump_framebuffer(dump_path, drawable_w, drawable_h)) {
+                const unsigned char *expect = slot_rgb[cur];
 
-            if (pixels != NULL && fp != NULL) {
-                gl.ReadPixels(0, 0, (GLsizei)drawable_w, (GLsizei)drawable_h,
-                              GL_RGBA, GL_UNSIGNED_BYTE, pixels);
-                fprintf(fp, "P6\n%d %d\n255\n", drawable_w, drawable_h);
-                for (i = drawable_h - 1; i >= 0; i--) {
-                    const unsigned char *row =
-                        pixels + (size_t)i * (size_t)drawable_w * 4u;
-                    int x;
-
-                    for (x = 0; x < drawable_w; x++) {
-                        unsigned char rgb[3];
-
-                        rgb[0] = row[x * 4 + 0];
-                        rgb[1] = row[x * 4 + 1];
-                        rgb[2] = row[x * 4 + 2];
-                        fwrite(rgb, 1, 3, fp);
-                    }
-                }
-                wrote_dump = 1;
+                if (force_t != NULL && atof(force_t) >= 0.5 && has_next)
+                    expect = slot_rgb[cur ^ 1];
+                compare_dump(expect, dump_path, drawable_w, drawable_h);
             }
-            if (fp != NULL)
-                fclose(fp);
-            free(pixels);
-            if (wrote_dump)
-                compare_dump(b, dump_path, drawable_w, drawable_h);
             dump_path = NULL;
+            if (force_t != NULL)
+                break;
         }
         SDL_GL_SwapWindow(window);
 
+        if (advanced) {
+            start_ms += frame_ms;
+            if (start_ms < now - frame_ms)
+                start_ms = now;
+            cur ^= 1;
+            bink_playback_publish(b, enabled, channels, rates, &audio,
+                                  &audio_bytes);
+            if (audio.ready)
+                bink_playback_set_paused(&audio, 0, &device_paused);
+            if (status == BINK_MORE) {
+                status = bink_next(b);
+                if (status == BINK_MORE || status == BINK_LAST) {
+                    upload_slot(tex[cur ^ 1], slot_rgb[cur ^ 1], b, w, h);
+                    upload_motion(mv_tex, b, &blocks_w, &blocks_h);
+                    decoded++;
+                } else {
+                    has_next = 0;
+                }
+            } else {
+                has_next = 0;
+            }
+        }
+
         if (test_frames != 0 && decoded >= test_frames)
             break;
-        if (status == BINK_LAST)
+        /* The last frame holds for one frame time, then playback ends. */
+        if (!has_next && status == BINK_LAST &&
+            now - start_ms >= frame_ms)
             break;
-        if (paused) {
-            SDL_Delay(10);
-            continue;
-        }
-
-        now = (double)SDL_GetTicks();
-        if (picture_ms == 0.0) {
-            unsigned long frame_bytes = bink_frame_bytes(
-                (unsigned long)(audio.rate > 0 ? audio.rate : 48000),
-                audio.channels > 0 ? audio.channels : 1, usf);
-            double byte_rate = (double)(audio.rate > 0 ? audio.rate : 48000) *
-                               (double)(audio.channels > 0 ? audio.channels : 1) *
-                               2.0;
-
-            picture_ms = usf / 1000.0;
-            if (audio.ready && frame_bytes > 0 && byte_rate > 0.0)
-                picture_ms = (double)frame_bytes / byte_rate * 1000.0;
-        }
-        if (next_due == 0.0)
-            next_due = now;
-        else if (now - next_due > picture_ms)
-            next_due = now;
-        next_due += picture_ms;
-        wait_until(next_due);
-
-        status = bink_next(b);
-        if (status == BINK_ERROR || status == BINK_DONE)
-            break;
-        decoded++;
-        bink_playback_publish(b, enabled, channels, rates, &audio,
-                              &audio_bytes);
-        if (audio.ready)
-            bink_playback_set_paused(&audio, 0, &device_paused);
+        if (!advanced)
+            wait_until(now + 4.0);
     }
 
 done:
@@ -741,6 +950,8 @@ done:
         printf("audio bytes %lu\n", audio_bytes);
     bink_playback_audio_close(&audio);
     bink_playback_shutdown();
+    free(slot_rgb[0]);
+    free(slot_rgb[1]);
     if (context != NULL)
         BINK_GL_DELETE_CONTEXT(context);
     if (window != NULL)
