@@ -474,6 +474,349 @@ done:
     return rc;
 }
 
+/* Per-frame packet sizes straight from the file index. Returns the frame
+ * count, or -1. */
+static int packet_sizes_all(const char *path, unsigned long *sizes, int max)
+{
+    FILE *fp = fopen(path, "rb");
+    unsigned char hdr[48];
+    unsigned long offs[32];
+    unsigned long file_size;
+    unsigned long frames;
+    int i;
+
+    if (fp == NULL)
+        return -1;
+    if (fread(hdr, 1, 44, fp) != 44) {
+        fclose(fp);
+        return -1;
+    }
+    file_size = read_u32(hdr + 4) + 8;
+    frames = read_u32(hdr + 8);
+    if (frames < 1 || frames > (unsigned long)max) {
+        fclose(fp);
+        return -1;
+    }
+    for (i = 0; i < (int)frames; i++) {
+        unsigned char entry[4];
+
+        if (fread(entry, 1, 4, fp) != 4) {
+            fclose(fp);
+            return -1;
+        }
+        offs[i] = read_u32(entry) & ~1ul;
+    }
+    fclose(fp);
+    for (i = 0; i < (int)frames; i++) {
+        unsigned long end = i + 1 < (int)frames ? offs[i + 1] : file_size;
+
+        if (end <= offs[i])
+            return -1;
+        sizes[i] = end - offs[i];
+    }
+    return (int)frames;
+}
+
+/* Decodes every frame and checks it against the matching source frame. */
+static int decode_within(bink movie, const uint8_t *frames, int count,
+                         unsigned width, unsigned height, uint8_t *y,
+                         uint8_t *u, uint8_t *v, unsigned maxerr,
+                         double rmse)
+{
+    size_t bytes = (size_t)width * height * 3;
+    char status;
+    int i;
+
+    if (bink_enable_video(movie, 1) != 0)
+        return 0;
+    status = bink_first(movie);
+    for (i = 0; i < count; i++) {
+        if (status != BINK_MORE && status != BINK_LAST) {
+            fprintf(stderr, "FAIL decode: stopped at frame %d\n", i);
+            return 0;
+        }
+        bink_enc_rgb_to_yuv(frames + (size_t)i * bytes, width, height, y, u,
+                            v);
+        if (!planes_within(movie, y, u, v, width, height, maxerr, rmse))
+            return 0;
+        if (i + 1 < count)
+            status = bink_next(movie);
+    }
+    return 1;
+}
+
+static int test_inter_dct(void)
+{
+    enum { W = 64, H = 48, N = 3 };
+    uint8_t *frames;
+    mem_source mem;
+    bink_enc_options opt;
+    unsigned long sizes[8];
+    char path[1024];
+    char err[256];
+    bink_enc_status status;
+    uint8_t *y;
+    uint8_t *u;
+    uint8_t *v;
+    size_t frame_bytes = (size_t)W * H * 3;
+    unsigned x;
+    unsigned yy;
+    bink movie;
+    int rc = 1;
+
+    frames = (uint8_t *)calloc((size_t)N, frame_bytes);
+    y = (uint8_t *)malloc((size_t)W * H);
+    u = (uint8_t *)malloc((size_t)(W / 2) * (H / 2));
+    v = (uint8_t *)malloc((size_t)(W / 2) * (H / 2));
+    if (frames == NULL || y == NULL || u == NULL || v == NULL) {
+        fprintf(stderr, "FAIL inter dct: out of memory\n");
+        goto done;
+    }
+    for (yy = 0; yy < H; yy++) {
+        for (x = 0; x < W; x++) {
+            uint8_t *p = frames + ((size_t)yy * W + x) * 3;
+
+            /* Fine detail: no shift of this pattern (plus a brightness step)
+             * can match exactly, and a flat step is cheap only when the
+             * residual is transform coded. */
+            p[0] = (uint8_t)((x * 73 + yy * 151 + x * yy * 3) & 255);
+            p[1] = (uint8_t)((x * 29 + yy * 47 + x * yy * 5) & 255);
+            p[2] = (uint8_t)((x * 11 + yy * 97 + x * yy * 7) & 255);
+        }
+    }
+    {
+        int f;
+        size_t i;
+
+        for (f = 1; f < N; f++) {
+            int add = 2 * f;
+            uint8_t *dst = frames + (size_t)f * frame_bytes;
+
+            memcpy(dst, frames, frame_bytes);
+            for (i = 0; i < frame_bytes; i++) {
+                unsigned value = (unsigned)dst[i] + (unsigned)add;
+
+                dst[i] = (uint8_t)(value > 255 ? 255 : value);
+            }
+        }
+    }
+
+    memset(&mem, 0, sizeof(mem));
+    mem.frames = frames;
+    mem.width = W;
+    mem.height = H;
+    mem.count = N;
+    mem.fail_index = -1;
+    bink_enc_options_default(&opt);
+    opt.verify = 1;
+    opt.keyframe_interval = 0;
+    opt.motion_range = 8;
+    path_for(path, sizeof(path), "inter_dct.bik");
+    err[0] = '\0';
+    status = encode_mem(&mem, &opt, path, 0, err, sizeof(err));
+    if (expect_ok(status, err, "inter dct") != 0)
+        goto done;
+    if (packet_sizes_all(path, sizes, 8) != N) {
+        fprintf(stderr, "FAIL inter dct: cannot read packet sizes\n");
+        goto done;
+    }
+    if (sizes[1] >= sizes[0] || sizes[2] >= sizes[0]) {
+        fprintf(stderr, "FAIL inter dct: sizes %lu %lu %lu\n", sizes[0],
+                sizes[1], sizes[2]);
+        goto done;
+    }
+    movie = bink_open_file(path, BINK_MODE_DISK);
+    if (movie == NULL) {
+        fprintf(stderr, "FAIL inter dct: decoder rejected the file\n");
+        goto done;
+    }
+    if (decode_within(movie, frames, N, W, H, y, u, v, 24, 4.0))
+        rc = 0;
+    bink_close(movie);
+done:
+    remove(path);
+    free(frames);
+    free(y);
+    free(u);
+    free(v);
+    return rc;
+}
+
+static int test_inter_dct_no_motion_search(void)
+{
+    enum { W = 64, H = 48 };
+    uint8_t *frames;
+    mem_source mem;
+    bink_enc_options opt;
+    unsigned long sizes[8];
+    char path[1024];
+    char err[256];
+    bink_enc_status status;
+    uint8_t *y;
+    uint8_t *u;
+    uint8_t *v;
+    size_t frame_bytes = (size_t)W * H * 3;
+    size_t i;
+    bink movie;
+    int rc = 1;
+
+    frames = (uint8_t *)calloc(2, frame_bytes);
+    y = (uint8_t *)malloc((size_t)W * H);
+    u = (uint8_t *)malloc((size_t)(W / 2) * (H / 2));
+    v = (uint8_t *)malloc((size_t)(W / 2) * (H / 2));
+    if (frames == NULL || y == NULL || u == NULL || v == NULL) {
+        fprintf(stderr, "FAIL inter no-search: out of memory\n");
+        goto done;
+    }
+    for (i = 0; i < (size_t)W * H; i++) {
+        unsigned x = (unsigned)i % W;
+        unsigned yy = (unsigned)i / W;
+        uint8_t *p = frames + i * 3;
+
+        /* Fine detail: intra coding is expensive here, so a small residual
+         * is the only way the P-frame gets much smaller. */
+        p[0] = (uint8_t)((x * 73 + yy * 151 + x * yy * 3) & 255);
+        p[1] = (uint8_t)((x * 29 + yy * 47 + x * yy * 5) & 255);
+        p[2] = (uint8_t)((x * 11 + yy * 97 + x * yy * 7) & 255);
+    }
+    /* The same picture plus a flat +3, so no exact match exists anywhere. */
+    for (i = 0; i < frame_bytes; i++) {
+        unsigned value = (unsigned)frames[i] + 3;
+
+        frames[frame_bytes + i] = (uint8_t)(value > 255 ? 255 : value);
+    }
+
+    memset(&mem, 0, sizeof(mem));
+    mem.frames = frames;
+    mem.width = W;
+    mem.height = H;
+    mem.count = 2;
+    mem.fail_index = -1;
+    bink_enc_options_default(&opt);
+    opt.verify = 1;
+    opt.keyframe_interval = 2;
+    opt.motion_range = 0;
+    path_for(path, sizeof(path), "inter_no_search.bik");
+    err[0] = '\0';
+    status = encode_mem(&mem, &opt, path, 0, err, sizeof(err));
+    if (expect_ok(status, err, "inter no-search") != 0)
+        goto done;
+    if (packet_sizes_all(path, sizes, 8) != 2) {
+        fprintf(stderr, "FAIL inter no-search: cannot read packet sizes\n");
+        goto done;
+    }
+    if (sizes[1] * 4 >= sizes[0]) {
+        fprintf(stderr, "FAIL inter no-search: sizes %lu %lu\n", sizes[0],
+                sizes[1]);
+        goto done;
+    }
+    movie = bink_open_file(path, BINK_MODE_DISK);
+    if (movie == NULL) {
+        fprintf(stderr, "FAIL inter no-search: decoder rejected the file\n");
+        goto done;
+    }
+    if (decode_within(movie, frames, 2, W, H, y, u, v, 24, 4.0))
+        rc = 0;
+    bink_close(movie);
+done:
+    remove(path);
+    free(frames);
+    free(y);
+    free(u);
+    free(v);
+    return rc;
+}
+
+static int test_inter_wrap_safety(void)
+{
+    enum { W = 64, H = 48 };
+    uint8_t *frames;
+    mem_source mem;
+    bink_enc_options opt;
+    unsigned long sizes[8];
+    char path[1024];
+    char err[256];
+    bink_enc_status status;
+    uint8_t *y;
+    uint8_t *u;
+    uint8_t *v;
+    size_t frame_bytes = (size_t)W * H * 3;
+    unsigned x;
+    unsigned yy;
+    bink movie;
+    int rc = 1;
+
+    frames = (uint8_t *)calloc(2, frame_bytes);
+    y = (uint8_t *)malloc((size_t)W * H);
+    u = (uint8_t *)malloc((size_t)(W / 2) * (H / 2));
+    v = (uint8_t *)malloc((size_t)(W / 2) * (H / 2));
+    if (frames == NULL || y == NULL || u == NULL || v == NULL) {
+        fprintf(stderr, "FAIL inter wrap: out of memory\n");
+        goto done;
+    }
+    for (yy = 0; yy < H; yy++) {
+        for (x = 0; x < W; x++) {
+            size_t p = ((size_t)yy * W + x) * 3;
+            unsigned detail = (x * 7 + yy * 13) % 55;
+            unsigned bright = 200 + detail;
+            unsigned dark = 3 + detail;
+
+            /* Detailed bright frame, then the same detail near black. The
+             * residual is about -197, so a wrapped reconstruction lands back
+             * near 250 and is far outside the block caps. */
+            frames[p + 0] = (uint8_t)bright;
+            frames[p + 1] = (uint8_t)bright;
+            frames[p + 2] = (uint8_t)bright;
+            frames[frame_bytes + p + 0] = (uint8_t)dark;
+            frames[frame_bytes + p + 1] = (uint8_t)dark;
+            frames[frame_bytes + p + 2] = (uint8_t)dark;
+        }
+    }
+
+    memset(&mem, 0, sizeof(mem));
+    mem.frames = frames;
+    mem.width = W;
+    mem.height = H;
+    mem.count = 2;
+    mem.fail_index = -1;
+    bink_enc_options_default(&opt);
+    opt.verify = 1;
+    opt.keyframe_interval = 2;
+    opt.motion_range = 0;
+    path_for(path, sizeof(path), "inter_wrap.bik");
+    err[0] = '\0';
+    status = encode_mem(&mem, &opt, path, 0, err, sizeof(err));
+    if (expect_ok(status, err, "inter wrap") != 0)
+        goto done;
+    if (packet_sizes_all(path, sizes, 8) != 2 || sizes[1] * 4 >= sizes[0]) {
+        fprintf(stderr, "FAIL inter wrap: sizes %lu %lu\n", sizes[0], sizes[1]);
+        goto done;
+    }
+    movie = bink_open_file(path, BINK_MODE_DISK);
+    if (movie == NULL) {
+        fprintf(stderr, "FAIL inter wrap: decoder rejected the file\n");
+        goto done;
+    }
+    if (decode_within(movie, frames, 2, W, H, y, u, v, 32, 5.0)) {
+        const unsigned char *plane = bink_get_plane(movie, BINK_PLANE_Y);
+        int stride = bink_get_stride(movie, 0);
+
+        if (plane == NULL || stride <= 0 || plane[0] + 32 >= 200) {
+            fprintf(stderr, "FAIL inter wrap: second frame stayed bright\n");
+        } else {
+            rc = 0;
+        }
+    }
+    bink_close(movie);
+done:
+    remove(path);
+    free(frames);
+    free(y);
+    free(u);
+    free(v);
+    return rc;
+}
+
 static int test_dct_roundtrip(void)
 {
     /* gradient, hard edge, flat, and pseudo-random blocks */
@@ -1311,6 +1654,12 @@ int main(void)
     if (test_skip_and_motion() != 0)
         return 1;
     if (test_intra_dct() != 0)
+        return 1;
+    if (test_inter_dct() != 0)
+        return 1;
+    if (test_inter_dct_no_motion_search() != 0)
+        return 1;
+    if (test_inter_wrap_safety() != 0)
         return 1;
     if (test_dct_roundtrip() != 0)
         return 1;

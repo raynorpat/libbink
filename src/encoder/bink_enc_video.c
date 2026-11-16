@@ -316,6 +316,50 @@ static int score_dct(const uint8_t desired[64], const uint8_t *pred,
     return bits;
 }
 
+/* Sum of squared differences over the visible pixels of one block. */
+static unsigned long ssd_visible(const uint8_t desired[64], const uint8_t *ref,
+                                 int stride, int plane_w, int plane_h, int bx,
+                                 int by, int mx, int my)
+{
+    unsigned long sum = 0;
+    int dy;
+    int dx;
+
+    for (dy = 0; dy < 8; dy++) {
+        int y = by * 8 + dy;
+        int sy = y + my;
+
+        if (y >= plane_h)
+            continue;
+        for (dx = 0; dx < 8; dx++) {
+            int x = bx * 8 + dx;
+            int sx = x + mx;
+            int diff;
+
+            if (x >= plane_w)
+                continue;
+            if (sx < 0 || sy < 0)
+                return (unsigned long)-1;
+            diff = (int)desired[dy * 8 + dx] -
+                   (int)ref[(size_t)sy * (size_t)stride + (size_t)sx];
+            sum += (unsigned long)(diff * diff);
+        }
+    }
+    return sum;
+}
+
+/* Copy the predictor block exactly the way MOTION_BLOCK painting does. */
+static void copy_predicted(uint8_t out[64], const uint8_t *ref, int stride,
+                           int bx, int by, int mx, int my)
+{
+    const uint8_t *src = ref + (size_t)(by * 8 + my) * (size_t)stride +
+                         (size_t)(bx * 8 + mx);
+    int y;
+
+    for (y = 0; y < 8; y++)
+        memcpy(out + y * 8, src + (size_t)y * (size_t)stride, 8);
+}
+
 static void paint_block(uint8_t *dst, int stride, const EncBlock *block,
                         const uint8_t *ref, int ref_x, int ref_y)
 {
@@ -348,6 +392,21 @@ static void paint_block(uint8_t *dst, int stride, const EncBlock *block,
 
         bink_enc_unquantize(block->t, block_quant(block), recon);
         bink_idct_put(dst, stride, recon);
+        return;
+    }
+    if (block->op == INTER_BLOCK) {
+        int32_t recon[64];
+        uint8_t tmp[64];
+        const uint8_t *src = ref +
+            (size_t)(ref_y + block->my) * (size_t)stride +
+            (size_t)(ref_x + block->mx);
+
+        for (y = 0; y < 8; y++)
+            memcpy(tmp + y * 8, src + (size_t)y * (size_t)stride, 8);
+        for (y = 0; y < 8; y++)
+            memcpy(dst + (size_t)y * (size_t)stride, tmp + y * 8, 8);
+        bink_enc_unquantize(block->t, block_quant(block), recon);
+        bink_idct_add(dst, stride, recon);
         return;
     }
     if (block->op == PATTERN_BLOCK) {
@@ -873,6 +932,9 @@ static int encode_plane(BinkBitWriter *bw, const uint8_t *src, int src_stride,
             int pixel;
             int found_motion = 0;
             int chosen = 0;
+            int best_mx = 0;
+            int best_my = 0;
+            int have_ref = !keyframe && ref != NULL;
 
             for (pixel = 0; pixel < 64; pixel++) {
                 int x = bx * 8 + (pixel & 7);
@@ -881,22 +943,31 @@ static int encode_plane(BinkBitWriter *bw, const uint8_t *src, int src_stride,
                 desired[pixel] =
                     src_at(src, src_stride, plane_w, plane_h, x, y);
             }
-            if (!keyframe && ref != NULL &&
-                visible_match(desired, ref, stride, plane_w, plane_h, bx, by,
-                              0, 0)) {
+            if (have_ref && visible_match(desired, ref, stride, plane_w,
+                                          plane_h, bx, by, 0, 0)) {
                 block->op = SKIP_BLOCK;
                 chosen = 1;
-            } else if (!keyframe && ref != NULL && motion_range > 0) {
-                int my;
-                int mx;
+            } else if (have_ref) {
+                /* Keep the best-SSD vector even when nothing matches exactly;
+                 * the residual coder uses it. */
+                unsigned long best_ssd = ssd_visible(desired, ref, stride,
+                                                     plane_w, plane_h, bx, by,
+                                                     0, 0);
                 int range = motion_range > 15 ? 15 : motion_range;
+                int my;
 
                 for (my = -range; my <= range && !found_motion; my++) {
+                    int mx;
+
                     for (mx = -range; mx <= range; mx++) {
+                        unsigned long ssd;
+                        int valid;
+
                         if (mx == 0 && my == 0)
                             continue;
-                        if (!motion_in_range(bx, by, mx, my, blocks_x,
-                                             blocks_y, stride, alloc_h))
+                        valid = motion_in_range(bx, by, mx, my, blocks_x,
+                                                blocks_y, stride, alloc_h);
+                        if (!valid)
                             continue;
                         if (visible_match(desired, ref, stride, plane_w,
                                           plane_h, bx, by, mx, my)) {
@@ -906,6 +977,13 @@ static int encode_plane(BinkBitWriter *bw, const uint8_t *src, int src_stride,
                             found_motion = 1;
                             chosen = 1;
                             break;
+                        }
+                        ssd = ssd_visible(desired, ref, stride, plane_w,
+                                          plane_h, bx, by, mx, my);
+                        if (ssd < best_ssd) {
+                            best_ssd = ssd;
+                            best_mx = mx;
+                            best_my = my;
                         }
                     }
                 }
@@ -946,37 +1024,76 @@ static int encode_plane(BinkBitWriter *bw, const uint8_t *src, int src_stride,
                         block->pattern[y] = (uint8_t)bits;
                     }
                 } else {
-                    /* Three or more values: raw is the safe fallback, and an
-                     * intra DCT block wins when it is cheaper within the caps. */
+                    /* Three or more values: raw is the safe fallback; intra and
+                     * (on P-frames) inter DCT blocks win when cheaper within
+                     * the caps. */
                     static const int quants[8] = { 0, 2, 4, 6, 8, 10, 12, 14 };
+                    uint8_t predicted[64];
+                    int have_pred = 0;
                     int best_bits = 512; /* open-coded raw block cost */
                     int best_maxerr = 256;
+                    int best_kind = 0; /* 0 raw, 1 intra, 2 inter */
                     int qi;
 
-                    block->op = RAW_BLOCK;
-                    memcpy(block->raw, desired, 64);
+                    if (have_ref && motion_in_range(bx, by, best_mx, best_my,
+                                                    blocks_x, blocks_y, stride,
+                                                    alloc_h)) {
+                        copy_predicted(predicted, ref, stride, bx, by, best_mx,
+                                       best_my);
+                        have_pred = 1;
+                    }
                     for (qi = 0; qi < 8; qi++) {
                         EncBlock candidate;
-                        int maxerr = 0;
-                        double rmse = 0.0;
+                        int maxerr;
+                        double rmse;
                         int bits;
 
                         memset(&candidate, 0, sizeof(candidate));
+                        maxerr = 0;
+                        rmse = 0.0;
                         bits = score_dct(desired, NULL,
                                          bink_enc_intra_quant(quants[qi]),
                                          quants[qi], &candidate, &maxerr,
                                          &rmse);
-                        if (bits < 0)
-                            continue;
-                        if (bits < best_bits ||
-                            (bits == best_bits && maxerr < best_maxerr)) {
+                        if (bits >= 0 &&
+                            (bits < best_bits ||
+                             (bits == best_bits && maxerr < best_maxerr))) {
                             best_bits = bits;
                             best_maxerr = maxerr;
+                            best_kind = 1;
                             memcpy(block->t, candidate.t, sizeof(block->t));
                             block->quant = candidate.quant;
                             block->cbits = candidate.cbits;
-                            block->op = INTRA_BLOCK;
                         }
+                        if (!have_pred)
+                            continue;
+                        memset(&candidate, 0, sizeof(candidate));
+                        maxerr = 0;
+                        rmse = 0.0;
+                        bits = score_dct(desired, predicted,
+                                         bink_enc_inter_quant(quants[qi]),
+                                         quants[qi], &candidate, &maxerr,
+                                         &rmse);
+                        if (bits >= 0 &&
+                            (bits < best_bits ||
+                             (bits == best_bits && maxerr < best_maxerr))) {
+                            best_bits = bits;
+                            best_maxerr = maxerr;
+                            best_kind = 2;
+                            memcpy(block->t, candidate.t, sizeof(block->t));
+                            block->quant = candidate.quant;
+                            block->cbits = candidate.cbits;
+                        }
+                    }
+                    if (best_kind == 0) {
+                        block->op = RAW_BLOCK;
+                        memcpy(block->raw, desired, 64);
+                    } else if (best_kind == 1) {
+                        block->op = INTRA_BLOCK;
+                    } else {
+                        block->op = INTER_BLOCK;
+                        block->mx = (int8_t)best_mx;
+                        block->my = (int8_t)best_my;
                     }
                 }
             }
@@ -997,13 +1114,16 @@ static int encode_plane(BinkBitWriter *bw, const uint8_t *src, int src_stride,
                     if (buf_push(&colors, block->raw[i]) != 0)
                         failed = 1;
                 }
-            } else if (block->op == MOTION_BLOCK) {
+            } else if (block->op == MOTION_BLOCK ||
+                       block->op == INTER_BLOCK) {
                 if (buf_push(&motion_x, (uint8_t)block->mx) != 0 ||
                     buf_push(&motion_y, (uint8_t)block->my) != 0)
                     failed = 1;
-            } else if (block->op == INTRA_BLOCK) {
-                intra_dc[intra_len++] = block->t[0];
             }
+            if (block->op == INTRA_BLOCK)
+                intra_dc[intra_len++] = block->t[0];
+            else if (block->op == INTER_BLOCK)
+                inter_dc[inter_len++] = block->t[0];
             if (failed)
                 goto done;
         }
