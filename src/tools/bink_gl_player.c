@@ -517,7 +517,7 @@ int main(int argc, char **argv)
     double frame_ms = 0.0;
     double start_ms = 0.0;
     float t = 0.0f;
-    int interp = 1;
+    int interp = 0;
     int cur = 0;
     int has_next = 0;
     int drawable_w = 0;
@@ -525,6 +525,8 @@ int main(int argc, char **argv)
     const char *dump_path = getenv("BINK_GL_DUMP");
     const char *force_shader = getenv("BINK_GL_SHADER");
     const char *force_t = getenv("BINK_GL_T");
+    const char *test_seek_env = getenv("BINK_GL_TEST_SEEK");
+    long test_seek = -1;
     GLint p_y = -1;
     GLint p_u = -1;
     GLint p_v = -1;
@@ -540,7 +542,6 @@ int main(int argc, char **argv)
     GLint i_matrix = -1;
     GLint i_offset = -1;
     GLint i_luma = -1;
-    GLint i_chroma = -1;
     GLint i_blocks = -1;
     GLint i_t = -1;
     int i;
@@ -548,6 +549,12 @@ int main(int argc, char **argv)
     memset(tex, 0, sizeof(tex));
     slot_rgb[0] = NULL;
     slot_rgb[1] = NULL;
+    {
+        long want = test_seek_env != NULL ? strtol(test_seek_env, NULL, 10) : -1;
+
+        if (want >= 0)
+            test_seek = want;
+    }
     if (force_shader != NULL && strcmp(force_shader, "present") == 0)
         interp = 0;
     if (argc != 2) {
@@ -677,7 +684,6 @@ int main(int argc, char **argv)
     i_matrix = gl.GetUniformLocation(program_interp, "u_yuv_to_rgb");
     i_offset = gl.GetUniformLocation(program_interp, "u_offset");
     i_luma = gl.GetUniformLocation(program_interp, "u_luma_size");
-    i_chroma = gl.GetUniformLocation(program_interp, "u_chroma_size");
     i_blocks = gl.GetUniformLocation(program_interp, "u_blocks");
     i_t = gl.GetUniformLocation(program_interp, "u_t");
 
@@ -725,20 +731,29 @@ int main(int argc, char **argv)
         goto done;
     }
 
-    if (bink_playback_audio_subsystem() == 0) {
+    {
         int rate = 0;
         int ch = 0;
 
         for (i = 0; i < 7; i++) {
-            if (enabled[i]) {
-                rate = (int)rates[i];
-                ch = channels[i];
-                break;
+            if (!enabled[i])
+                continue;
+            rate = (int)rates[i];
+            if (channels[i] > 1)
+                ch = 2;
+        }
+        if (ch == 0)
+            ch = 1;
+        if (rate > 0) {
+            if (bink_playback_audio_subsystem() != 0) {
+                fprintf(stderr, "%s\n", SDL_GetError());
+            } else if (bink_playback_audio_open(&audio, rate, ch) != 0) {
+                fprintf(stderr, "%s\n", SDL_GetError());
+            } else {
+                /* SDL opens the device paused; resume needs to know. */
+                device_paused = 1;
             }
         }
-        if (rate > 0 && ch > 0 &&
-            bink_playback_audio_open(&audio, rate, ch) != 0)
-            bink_playback_audio_close(&audio);
     }
 
     status = bink_first(b);
@@ -765,11 +780,15 @@ int main(int argc, char **argv)
     printf("Opened file %s\nWidth: %lu\nHeight: %lu\nFrames: %lu\nFPS: %f\n",
            path, w, h, frames, 1000000.0 / usf);
     fflush(stdout);
+    snprintf(title, sizeof(title), "bink_gl_player - %s - %s", path,
+             interp ? "interpolation" : "presentation");
+    SDL_SetWindowTitle(window, title);
 
     for (;;) {
         SDL_Event event;
         double now;
         int advanced = 0;
+        long seek_target = -1;
 
         while (SDL_PollEvent(&event)) {
             int key;
@@ -794,32 +813,63 @@ int main(int argc, char **argv)
             } else if (key == SDLK_LEFT || key == SDLK_RIGHT) {
                 unsigned long cur_frame = 0;
                 unsigned long step;
-                long target;
 
                 bink_info_all(b, &cur_frame, &frames, NULL);
                 step = (unsigned long)(1000000.0 / usf + 0.5);
                 if (step < 1)
                     step = 1;
-                target = (long)cur_frame +
-                         (key == SDLK_LEFT ? -(long)step : (long)step);
-                if (target < 0)
-                    target = 0;
-                if (frames > 0 && target >= (long)frames)
-                    target = (long)frames - 1;
-                if (bink_playback_seek(b, (unsigned long)target, &status,
-                                       &audio, usf, enabled, channels,
-                                       rates) == 0) {
-                    upload_slot(tex[cur], slot_rgb[cur], b, w, h);
-                    has_next = 0;
-                    start_ms = (double)SDL_GetTicks();
-                    t = 0.0f;
-                }
+                seek_target = (long)cur_frame +
+                              (key == SDLK_LEFT ? -(long)step : (long)step);
             }
         }
         if (quit)
             break;
 
+        if (test_seek >= 0) {
+            seek_target = test_seek;
+            test_seek = -1;
+        }
+        if (seek_target >= 0) {
+            long target = seek_target;
+
+            seek_target = -1;
+            if (target < 0)
+                target = 0;
+            if (frames > 0 && target >= (long)frames)
+                target = (long)frames - 1;
+            if (bink_playback_seek(b, (unsigned long)target, &status, &audio,
+                                   usf, enabled, channels, rates) == 0) {
+                upload_slot(tex[cur], slot_rgb[cur], b, w, h);
+                has_next = 0;
+                blocks_w = 0;
+                blocks_h = 0;
+                start_ms = (double)SDL_GetTicks();
+                t = 0.0f;
+                if (status == BINK_MORE) {
+                    char next_status = bink_next(b);
+
+                    if (next_status == BINK_MORE || next_status == BINK_LAST) {
+                        status = next_status;
+                        upload_slot(tex[cur ^ 1], slot_rgb[cur ^ 1], b, w, h);
+                        upload_motion(mv_tex, b, &blocks_w, &blocks_h);
+                        has_next = 1;
+                        decoded++;
+                    }
+                }
+            }
+        }
+
         now = (double)SDL_GetTicks();
+        if (audio.ready && has_next && !paused) {
+            /* The queue only vetoes: hold the picture while the device is
+             * more than two frames behind, so it can never run away. */
+            unsigned long frame_bytes = bink_frame_bytes(
+                (unsigned long)audio.rate, audio.channels, usf);
+
+            if (frame_bytes > 0 &&
+                bink_playback_queued(&audio) > 2ul * frame_bytes)
+                now = start_ms;
+        }
         if (force_t != NULL) {
             t = (float)atof(force_t);
             if (t < 0.0f)
@@ -875,8 +925,6 @@ int main(int argc, char **argv)
             gl.UniformMatrix3fv(i_matrix, 1, GL_FALSE, yuv_matrix);
             gl.Uniform3f(i_offset, offset[0], offset[1], offset[2]);
             gl.Uniform2f(i_luma, (GLfloat)w, (GLfloat)h);
-            gl.Uniform2f(i_chroma, (GLfloat)((w + 1) / 2),
-                         (GLfloat)((h + 1) / 2));
             gl.Uniform2i(i_blocks, (GLint)(blocks_w > 0 ? blocks_w : 1),
                          (GLint)(blocks_h > 0 ? blocks_h : 1));
             gl.Uniform1f(i_t, t);
@@ -947,7 +995,8 @@ int main(int argc, char **argv)
 
 done:
     if (test_frames != 0)
-        printf("audio bytes %lu\n", audio_bytes);
+        printf("audio bytes %lu, queued %lu\n", audio_bytes,
+               bink_playback_queued(&audio));
     bink_playback_audio_close(&audio);
     bink_playback_shutdown();
     free(slot_rgb[0]);
