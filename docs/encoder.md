@@ -26,8 +26,15 @@ Install publishes `libbinkenc.a` and `bink_encoder.h` next to `libbink`.
 The signature is `BIKi`. Versions before `i` store colors with a signed
 bias; `i` stores the byte as written.
 
-Video is lossless on the encoder's own YUV planes, not on the source RGB.
-The conversion is the BT.601 studio matrix the decoder inverts:
+Video is lossy: each 8x8 block is transformed, quantized, and coded with
+the decoder's inverse DCT. The block types are intra DCT (keyframes and
+standalone blocks) and inter DCT (a motion-compensated residual on delta
+frames), with fill, pattern, raw, skip, and exact-match motion kept as
+lossless fallbacks. A block takes the cheapest coding that stays inside
+its error caps (max 24, RMSE 4.0); DCT candidates use quantizer indices
+`{0, 2, 4, 6, 8, 10, 12, 14}`.
+
+The planes are Y, U, V from the BT.601 studio matrix the decoder inverts:
 
 - `Y = clamp(((66R + 129G + 25B + 128) >> 8) + 16)`
 - `U = clamp(((-38R - 74G + 112B + 128) >> 8) + 128)`
@@ -35,13 +42,13 @@ The conversion is the BT.601 studio matrix the decoder inverts:
 
 Chroma is 4:2:0. Each chroma sample is the average of the converted
 samples in the existing 2x2, not a conversion of the average RGB. That
-step is lossy against the original RGB. `--verify` converts again with
-the same function and compares the visible Y, U, and V samples.
+step is lossy against the original RGB. `--verify` decodes the result and
+checks each visible plane against the same conversion within a tolerance:
+max error 32 and RMSE 5.0 per plane, not bit-exact.
 
-Blocks are 8x8. The encoder uses fill (one color), pattern (two colors),
-raw, and on delta frames skip and motion. Motion offsets are limited to
--15..15 and to the decoder's reference window. There is no alpha, no gray
-flag, and no scaled, DCT, residue, or run blocks.
+Blocks are 8x8. Motion offsets are limited to -15..15 and to the decoder's
+reference window. There is no alpha, no gray flag, no scaled block, and no
+residue or run block.
 
 Frame 0 is always a keyframe. `--keyframe-interval N` also marks frames
 `N`, `2N`, ... . `N` of 0 marks only frame 0. Keyframes do not use skip
@@ -49,9 +56,13 @@ or motion.
 
 Each audio track is Bink DCT (`flags` `0x1000`, plus `0x2000` when stereo).
 `bink_build` writes one track. The library accepts up to seven.
-Each coefficient block stores a DC value and zero AC coefficients, aligned
-to 32 bits. Silence stays exact zeros. A constant tone decodes near that
-level; it is not a sample-exact copy of the PCM. RDFT is not written.
+Each block carries a full DCT coefficient set: the forward transform
+inverts the decoder's `dct_iii`, the encoder chooses one quantizer index
+per band (the smallest that keeps the band's loudest coefficient within
+10 bits), and long zero spans collapse into single run-length chunks.
+The overlap tail is filled with the next block's samples, so the
+decoder's crossfade reproduces the source exactly before quantization.
+RDFT is not written.
 The sample rate must fit in the header's 16-bit field (1..65535). A
 24-bit WAV is reduced to 16-bit, and the loader prints
 `warning: 24-bit WAV reduced to 16-bit`.
@@ -80,7 +91,7 @@ that was compressed into that file.
 | `--fps N[/D]` | Frame rate, default `15` |
 | `--keyframe-interval N` | Default `150`. `0` marks only frame 0 |
 | `--motion-range N` | Search radius `0..15`, default `8`. `0` disables motion |
-| `--verify` | Decode and compare visible YUV planes and audio byte counts |
+| `--verify` | Decode and check visible YUV planes within tolerance, plus audio byte counts |
 | `--verbose`, `--quiet` | Progress on stderr |
 | `-h`, `--help`, `--version` | Usage and `bink_build 0.1.0` |
 

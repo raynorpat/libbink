@@ -17,9 +17,10 @@ other tracks continue. Bink 2 (`KB2*`) and the legacy `BIKb` plane decoder
 are not supported in this version.
 
 The encoder library writes `BIKi` from packed RGB and optional PCM. Video
-matches the YUV planes the encoder produced. Audio is Bink DCT: silence
-stays silent, and a steady tone decodes near that level. See
-`docs/encoder.md`.
+is coded as intra and motion-compensated inter DCT blocks with lossless
+fallbacks for flat, two-tone, and raw blocks; `--verify` checks the decoded
+planes within a stated tolerance. Audio is full Bink DCT with one quantizer
+per band and zero-run coding. See `docs/encoder.md`.
 
 Decoded frames are available as padded YUV 4:2:0 planes (plus alpha when
 present) and as a lazily converted packed RGB24 buffer. Keyframe seeking
