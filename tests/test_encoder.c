@@ -380,54 +380,85 @@ static int test_dct_roundtrip(void)
     return failures;
 }
 
-static int test_coeff_writer_roundtrip(void)
+/* Write t, count it with a NULL writer, and read it back with the decoder's
+ * parser. Returns 0 when every step agrees. */
+static int coeff_writer_trial(const int16_t t[64], int quant_index)
 {
     BinkBitWriter bw;
-    int16_t t[64];
+    BinkBits bits;
     int16_t back[64];
-    int seed = 12345;
+    int cbits = bink_enc_cbits(t);
+    int bits_written;
+    int bits_counted;
+    int q;
+
+    bink_bw_init(&bw);
+    bits_written = bink_enc_emit_coeffs(&bw, t, cbits, quant_index);
+    if (bits_written < 0) {
+        bink_bw_free(&bw);
+        return 1;
+    }
+    bits_counted = bink_enc_emit_coeffs(NULL, t, cbits, quant_index);
+    if (bits_counted != bits_written) {
+        bink_bw_free(&bw);
+        return 1;
+    }
+    bink_bits_init(&bits, bink_bw_data(&bw),
+                   (size_t)((bits_written + 7) / 8));
+    q = bink_video_read_coeffs(&bits, back);
+    bink_bw_free(&bw);
+    if (q != quant_index)
+        return 1;
+    if (memcmp(t, back, sizeof(back)) != 0)
+        return 1;
+    return 0;
+}
+
+static int test_coeff_writer_roundtrip(void)
+{
+    int16_t t[64];
+    uint32_t seed = 12345u;
     int trial;
 
     for (trial = 0; trial < 64; trial++) {
-        BinkBits bits;
-        int cbits;
-        int q;
         int i;
-        int bits_written;
-        int bits_counted;
 
         memset(t, 0, sizeof(t));
         /* sparse AC values; DC is bundled and must stay 0 here */
         for (i = 1; i < 64; i++) {
-            seed = seed * 1103515245 + 12345;
+            seed = seed * 1103515245u + 12345u;
             if (((seed >> 16) & 3) == 0)
-                t[i] = (int16_t)(((seed >> 20) % 2047) - 1023);
+                t[i] = (int16_t)((int)((seed >> 20) % 2047) - 1023);
         }
         if (trial == 0)
             memset(t, 0, sizeof(t)); /* all-zero AC must round-trip too */
 
-        cbits = bink_enc_cbits(t);
-        bink_bw_init(&bw);
-        bits_written = bink_enc_emit_coeffs(&bw, t, cbits, trial & 15);
-        if (bits_written < 0) {
-            bink_bw_free(&bw);
-            return 1;
-        }
-        bits_counted = bink_enc_emit_coeffs(NULL, t, cbits, trial & 15);
-        if (bits_counted != bits_written) {
-            bink_bw_free(&bw);
-            return 1;
-        }
-        bink_bits_init(&bits, bink_bw_data(&bw),
-                       (size_t)((bits_written + 7) / 8));
-        q = bink_video_read_coeffs(&bits, back);
-        bink_bw_free(&bw);
-        if (q != (trial & 15))
-            return 1;
-        if (memcmp(t, back, sizeof(t)) != 0)
+        if (coeff_writer_trial(t, trial & 15) != 0)
             return 1;
     }
     return 0;
+}
+
+static int test_coeff_writer_high_planes(void)
+{
+    int16_t t[64];
+    uint32_t seed = 2463534242u;
+    int i;
+
+    memset(t, 0, sizeof(t));
+    /* Dense AC with magnitudes up to 32767 so planes 10..14 are coded. */
+    for (i = 1; i < 64; i++) {
+        int magnitude;
+
+        seed = seed * 1103515245u + 12345u;
+        magnitude = (int)((seed >> 12) % 32767) + 1;
+        t[i] = (int16_t)((seed & 1) ? -magnitude : magnitude);
+    }
+    t[7] = 32767;
+    t[13] = -32767;
+    if (bink_enc_cbits(t) != 15)
+        return 1;
+    return coeff_writer_trial(t, 9);
 }
 
 static int test_cbits(void)
@@ -1140,6 +1171,8 @@ int main(void)
     if (test_dct_roundtrip() != 0)
         return 1;
     if (test_coeff_writer_roundtrip() != 0)
+        return 1;
+    if (test_coeff_writer_high_planes() != 0)
         return 1;
     if (test_cbits() != 0)
         return 1;

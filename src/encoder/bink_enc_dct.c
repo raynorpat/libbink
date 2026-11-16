@@ -124,6 +124,7 @@ static int dct_invert(const double src[8][8], double inv[8][8])
 }
 
 static double dct_ci[8][8];
+/* Single-threaded encoder; see design doc. Built on first use. */
 static int dct_ready;
 
 static int dct_init(void)
@@ -400,6 +401,8 @@ int bink_enc_emit_coeffs(BinkBitWriter *bw, const int16_t t[64], int cbits,
 {
     CoeffBits cb;
 
+    if (cbits != bink_enc_cbits(t))
+        return -1;
     if (cbits < 0 || cbits > 15 || quant_index < 0 || quant_index > 15)
         return -1;
     cb.bw = bw;
