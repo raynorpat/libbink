@@ -330,6 +330,145 @@ static int emit_tree(CoeffBits *cb, const int16_t t[64], int cbits)
     return 0;
 }
 
+/* RESIDUE blocks: a signed residual coded as a bit plane. The decoder
+ * (read_residue) resolves each coefficient's sign the plane its magnitude's
+ * top bit sits in, then refines it one plane at a time from a list of
+ * already-significant coefficients. Mirrors that walk, with values taken in
+ * raster order and mapped through the scan. */
+int bink_enc_emit_residue(BinkBitWriter *bw, const int16_t residual[64])
+{
+    const uint8_t *scan = bink_enc_scan();
+    int16_t t[64];
+    int nz[64];
+    int nz_count = 0;
+    int coef_list[128];
+    int mode_list[128];
+    int list_start = 64;
+    int list_end = 64;
+    int mask_bits = 0;
+    int budget = 0;
+    CoeffBits cb;
+    int i;
+    int plane;
+
+    if (residual == NULL)
+        return -1;
+    for (i = 0; i < 64; i++) {
+        int value = residual[scan[i]];
+        unsigned mag;
+
+        if (value < -255 || value > 255)
+            return -1;
+        t[i] = (int16_t)value;
+        mag = (unsigned)(value < 0 ? -value : value);
+        while (mag != 0) {
+            budget++;
+            mag &= mag - 1u;
+        }
+    }
+    /* The decoder stops on the 128th significant bit, so a denser block
+     * would desync rather than truncate cleanly. */
+    if (budget > 127)
+        return -1;
+    for (i = 0; i < 64; i++) {
+        int p = coeff_plane(t[i]);
+
+        if (p > mask_bits)
+            mask_bits = p;
+    }
+
+    cb.bw = bw;
+    cb.count = 0;
+    if (coeff_put(&cb, (unsigned)budget, 7) != 0 ||
+        coeff_put(&cb, (unsigned)mask_bits, 3) != 0)
+        return -1;
+
+    coef_list[list_end] = 4;  mode_list[list_end++] = 0;
+    coef_list[list_end] = 24; mode_list[list_end++] = 0;
+    coef_list[list_end] = 44; mode_list[list_end++] = 0;
+    coef_list[list_end] = 0;  mode_list[list_end++] = 2;
+
+    for (plane = mask_bits; plane >= 0; plane--) {
+        int mask = 1 << plane;
+        int list_pos;
+
+        for (i = 0; i < nz_count; i++) {
+            int mag = t[nz[i]] < 0 ? -t[nz[i]] : t[nz[i]];
+
+            if (coeff_put(&cb, (unsigned)((mag & mask) ? 1 : 0), 1) != 0)
+                return -1;
+        }
+        list_pos = list_start;
+        while (list_pos < list_end) {
+            int coef = coef_list[list_pos];
+            int mode = mode_list[list_pos];
+            int open;
+
+            if (!(mode | coef)) {
+                list_pos++;
+                continue;
+            }
+            if (mode == 3)
+                open = coeff_plane(t[coef]) == plane;
+            else
+                open = group_has_plane(t, coef, mode, plane);
+            if (coeff_put(&cb, open ? 1u : 0u, 1) != 0)
+                return -1;
+            if (!open) {
+                list_pos++;
+                continue;
+            }
+            switch (mode) {
+            case 0:
+                coef_list[list_pos] = coef + 4;
+                mode_list[list_pos] = 1;
+                /* fall through */
+            case 2:
+                if (mode == 2) {
+                    coef_list[list_pos] = 0;
+                    mode_list[list_pos++] = 0;
+                }
+                for (i = 0; i < 4; i++, coef++) {
+                    if (coeff_plane(t[coef]) == plane) {
+                        if (coeff_put(&cb, 0, 1) != 0 ||
+                            coeff_put(&cb, (unsigned)(t[coef] < 0), 1) != 0)
+                            return -1;
+                        nz[nz_count++] = coef;
+                    } else {
+                        if (list_start <= 0)
+                            return -1;
+                        if (coeff_put(&cb, 1, 1) != 0)
+                            return -1;
+                        coef_list[--list_start] = coef;
+                        mode_list[list_start] = 3;
+                    }
+                }
+                break;
+            case 1:
+                mode_list[list_pos] = 2;
+                for (i = 0; i < 3; i++) {
+                    coef += 4;
+                    if (list_end >= 128)
+                        return -1;
+                    coef_list[list_end] = coef;
+                    mode_list[list_end++] = 2;
+                }
+                break;
+            case 3:
+                if (coeff_put(&cb, (unsigned)(t[coef] < 0), 1) != 0)
+                    return -1;
+                nz[nz_count++] = coef;
+                coef_list[list_pos] = 0;
+                mode_list[list_pos++] = 0;
+                break;
+            default:
+                return -1;
+            }
+        }
+    }
+    return cb.count;
+}
+
 int bink_enc_emit_coeffs(BinkBitWriter *bw, const int16_t t[64], int cbits,
                          int quant_index)
 {

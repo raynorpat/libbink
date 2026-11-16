@@ -109,6 +109,12 @@ const int32_t *bink_video_inter_quant(int index);
  * it directly.
  */
 int bink_video_read_coeffs(BinkBits *bits, int16_t t[64]);
+/**
+ * Test hook: read one RESIDUE block the way decode_plane does, including
+ * its 7-bit budget. block is raster-ordered and zeroed first. Returns 0 or
+ * -1. Mirrors read_residue; never change it to suit the encoder.
+ */
+int bink_video_read_residue(BinkBits *bits, int16_t block[64]);
 
 /**
  * Plane geometry shared by the decoder and the encoder.

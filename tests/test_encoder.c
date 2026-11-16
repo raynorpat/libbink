@@ -943,6 +943,90 @@ done:
     return rc;
 }
 
+/* Write a residue payload, count it, and read it back with the decoder. */
+static int residue_trial(const int16_t res[64])
+{
+    BinkBitWriter bw;
+    BinkBits bits;
+    int16_t back[64];
+    int written;
+    int counted;
+
+    bink_bw_init(&bw);
+    written = bink_enc_emit_residue(&bw, res);
+    if (written < 0) {
+        bink_bw_free(&bw);
+        return 1;
+    }
+    counted = bink_enc_emit_residue(NULL, res);
+    if (counted != written) {
+        bink_bw_free(&bw);
+        return 1;
+    }
+    bink_bits_init(&bits, bink_bw_data(&bw), (size_t)((written + 7) / 8));
+    if (bink_video_read_residue(&bits, back) != 0) {
+        bink_bw_free(&bw);
+        return 1;
+    }
+    bink_bw_free(&bw);
+    return memcmp(res, back, sizeof(back)) != 0;
+}
+
+static int test_residue_writer_roundtrip(void)
+{
+    int16_t res[64];
+    uint32_t seed = 12345u;
+    int trial;
+    int i;
+
+    memset(res, 0, sizeof(res));
+    if (residue_trial(res) != 0) {
+        fprintf(stderr, "FAIL residue: zero block\n");
+        return 1;
+    }
+    for (i = 0; i < 3; i++) {
+        memset(res, 0, sizeof(res));
+        res[i * 17] = (int16_t)(i == 0 ? 1 : (i == 1 ? -1 : 255));
+        if (residue_trial(res) != 0) {
+            fprintf(stderr, "FAIL residue: single %d\n", res[i * 17]);
+            return 1;
+        }
+    }
+    memset(res, 0, sizeof(res));
+    res[5] = -255;
+    if (residue_trial(res) != 0) {
+        fprintf(stderr, "FAIL residue: -255\n");
+        return 1;
+    }
+    for (trial = 0; trial < 32; trial++) {
+        memset(res, 0, sizeof(res));
+        for (i = 0; i < 64; i++) {
+            seed = seed * 1103515245u + 12345u;
+            if (((seed >> 16) & 7u) == 0)
+                res[i] = (int16_t)((int)((seed >> 20) % 511u) - 255);
+        }
+        if (residue_trial(res) != 0) {
+            fprintf(stderr, "FAIL residue: sparse trial %d\n", trial);
+            return 1;
+        }
+    }
+    memset(res, 0, sizeof(res));
+    for (i = 0; i < 63; i++)
+        res[i] = 3;
+    if (residue_trial(res) != 0) {
+        fprintf(stderr, "FAIL residue: 126 bits\n");
+        return 1;
+    }
+    memset(res, 0, sizeof(res));
+    for (i = 0; i < 64; i++)
+        res[i] = 3;
+    if (bink_enc_emit_residue(NULL, res) >= 0) {
+        fprintf(stderr, "FAIL residue: 128 bits accepted\n");
+        return 1;
+    }
+    return 0;
+}
+
 static int test_dct_roundtrip(void)
 {
     /* gradient, hard edge, flat, and pseudo-random blocks */
@@ -2419,6 +2503,8 @@ int main(void)
     if (test_inter_dc_range() != 0)
         return 1;
     if (test_inter_chain() != 0)
+        return 1;
+    if (test_residue_writer_roundtrip() != 0)
         return 1;
     if (test_dct_roundtrip() != 0)
         return 1;

@@ -42,6 +42,13 @@ void bink_enc_unquantize(const int16_t t[64], const int32_t quant[64],
  * rejected there (and is unreachable through quantization). */
 int bink_enc_cbits(const int16_t t[64]);
 
+/* Write one RESIDUE payload: the 7-bit budget, the 3-bit top plane, and
+ * the bit-plane tree. residual is raster-ordered, each value in -255..255.
+ * Returns the number of bits, or -1 when the block does not fit (a value
+ * out of range, or more than 127 significant bits). bw == NULL counts
+ * without writing. */
+int bink_enc_emit_residue(BinkBitWriter *bw, const int16_t residual[64]);
+
 /* Write cbits, the coefficient tree, and the quantizer index. With bw NULL
  * the same bits are counted instead. cbits must equal bink_enc_cbits(t).
  * Returns the number of bits or -1. */

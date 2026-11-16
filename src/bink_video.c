@@ -973,6 +973,17 @@ static void copy_block_overlapped(unsigned char *dst, const unsigned char *src,
         memcpy(dst + (size_t)i * (size_t)stride, tmp + i * 8, 8);
 }
 
+int bink_video_read_residue(BinkBits *bits, int16_t block[64])
+{
+    int budget;
+
+    memset(block, 0, sizeof(int16_t) * 64);
+    budget = bink_bits_read(bits, 7);
+    if (budget < 0)
+        return -1;
+    return read_residue(bits, block, budget);
+}
+
 static int bink_put_pixels(BinkVideo *v, unsigned char *dst,
                            unsigned char *prev, int stride,
                            unsigned char *ref_start, unsigned char *ref_end)
