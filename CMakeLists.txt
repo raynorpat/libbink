@@ -103,6 +103,9 @@ if(BINK_BUILD_TOOLS)
 
   # The SDL player is optional: prefer SDL3, fall back to SDL2, and skip the
   # example rather than breaking the rest of the tool build.
+  if(CMAKE_CROSSCOMPILING)
+    message(STATUS "Cross-compiling: skipping the SDL players.")
+  else()
   if(NOT BINK_SDL_VERSION MATCHES "^(AUTO|2|3)$")
     message(FATAL_ERROR
       "BINK_SDL_VERSION must be AUTO, 2 or 3 (got '${BINK_SDL_VERSION}')")
@@ -163,6 +166,25 @@ if(BINK_BUILD_TOOLS)
         -Wno-deprecated-declarations)
     endif()
     message(STATUS "bink_sdl_player: linking ${BINK_LINK_TARGET} and ${BINK_SDL_TARGET}")
+  endif()
+  endif()
+
+  # Windows players: raw Win32 window, Direct3D 9 or 11, waveOut audio.
+  if(WIN32)
+    foreach(api d3d9 d3d11)
+      add_executable(bink_${api}_player
+        src/tools/bink_win32_player.c
+        src/tools/bink_${api}_renderer.c
+        src/tools/bink_playback.c
+        src/tools/bink_playback_win32.c
+        src/tools/bink_mix.c)
+      bink_set_compile_settings(bink_${api}_player)
+      target_link_libraries(bink_${api}_player PRIVATE
+        ${BINK_LINK_TARGET} ${api} dxguid d3dcompiler winmm)
+    endforeach()
+    target_compile_definitions(bink_d3d9_player PRIVATE BINK_D3D9=1)
+    target_compile_definitions(bink_d3d11_player PRIVATE BINK_D3D11=1)
+    message(STATUS "bink_d3d9_player and bink_d3d11_player: Direct3D and waveOut")
   endif()
 endif()
 

@@ -11,7 +11,7 @@
 
 /* Per-plane tolerance: exact output passes trivially, DCT blocks must stay
  * inside these caps. */
-static const int MAX_ERROR = 32;
+static const unsigned MAX_ERROR = 32;
 static const double MAX_RMSE = 5.0;
 
 static bink_enc_status fail(char *err, size_t errlen, const char *message)

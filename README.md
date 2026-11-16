@@ -45,9 +45,10 @@ cmake -S . -B build -DBINK_BUILD_TOOLS=ON
 cmake --build build
 ```
 
-Requires CMake 3.16 or newer and a C99 compiler. The players are optional
-and built only when an SDL3 or SDL2 CMake package is available; the OpenGL
-one also needs a GL 3.2 driver at run time.
+Requires CMake 3.16 or newer and a C99 compiler. The SDL players are
+optional and built only when an SDL3 or SDL2 CMake package is available;
+the OpenGL one also needs a GL 3.2 driver at run time. The Direct3D
+players build only on Windows.
 
 Options:
 
@@ -92,6 +93,12 @@ Full documentation is in `docs/usage.md`.
   decoder's motion vectors, so motion looks smoother than the source
   rate. Needs SDL and a GL 3.2 driver; the player itself runs only when a
   display is available.
+- `bink_d3d9_player video.bik` / `bink_d3d11_player video.bik` - Windows
+  players with the same controls and the same two shaders as the OpenGL
+  one, on Direct3D 9 or 11. Raw Win32 window, `waveOut` audio, no SDL.
+  They build on Windows, and cross-compile with mingw:
+  `cmake -S . -B build-win -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64.cmake
+  -DBINK_BUILD_TOOLS=ON -DBINK_BUILD_TESTS=OFF`.
 - `bink_dump [--frames N] video.bik [outdir]` - headless PPM frame dump and
   checksums. Writes `frame_%05u.ppm` (P6) files.
 - `bink_build <images> [-o out.bik]` - encode a directory of PPM, BMP, PNG, or JPEG frames,
