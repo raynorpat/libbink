@@ -519,14 +519,13 @@ int bink_gl_renderer_upload(BinkRenderer *r, bink object, int slot)
     return 0;
 }
 
-int bink_gl_renderer_upload_motion(BinkRenderer *r, bink object)
+int bink_gl_renderer_upload_motion(BinkRenderer *r, bink object,
+                                   unsigned long *blocks_w,
+                                   unsigned long *blocks_h)
 {
-    unsigned long bw = 0;
-    unsigned long bh = 0;
-
     if (r == NULL)
         return -1;
-    return upload_motion(r->mv_tex, object, &bw, &bh);
+    return upload_motion(r->mv_tex, object, blocks_w, blocks_h);
 }
 
 int bink_gl_renderer_draw(BinkRenderer *r, const BinkRenderParams *params)

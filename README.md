@@ -87,12 +87,16 @@ Full documentation is in `docs/usage.md`.
 - `bink_sdl_player video.bik` - SDL3 (preferred) or SDL2 playback.
   Enables every audio track and mixes them. Esc/Q quits, Space pauses the
   picture and the sound, Left/Right seek one second.
+- `bink_sdlmetal_player video.bik` - the same controls through Metal on
+  macOS. Both SDL players share one loop; only the renderer differs.
 - `bink_sdlgl_player video.bik` - the same controls on an OpenGL 3.2 window.
   The YUV to RGB conversion runs in a GLSL shader, and `M` switches to a
   second shader that interpolates between decoded frames using the
   decoder's motion vectors, so motion looks smoother than the source
   rate. Needs SDL and a GL 3.2 driver; the player itself runs only when a
-  display is available.
+  display is available. Both players accept `BINK_PLAYER_TEST_FRAMES`,
+  `BINK_PLAYER_SHADER`, `BINK_PLAYER_T`, `BINK_PLAYER_DUMP` and
+  `BINK_PLAYER_TEST_SEEK` for headless checks.
 - `bink_d3d9_player video.bik` / `bink_d3d11_player video.bik` - Windows
   players with the same controls and the same two shaders as the OpenGL
   one, on Direct3D 9 or 11. Raw Win32 window, `waveOut` audio, no SDL.

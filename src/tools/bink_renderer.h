@@ -26,7 +26,8 @@ typedef struct {
     int (*prepare)(void);
     BinkRenderer *(*create)(void *window, unsigned long w, unsigned long h);
     int (*upload)(BinkRenderer *r, bink object, int slot);
-    int (*upload_motion)(BinkRenderer *r, bink object);
+    int (*upload_motion)(BinkRenderer *r, bink object,
+                         unsigned long *blocks_w, unsigned long *blocks_h);
     int (*draw)(BinkRenderer *r, const BinkRenderParams *params);
     /* Read the last drawn frame back as packed RGB24 at the plane size,
      * top-down. Returns 0 on success. */

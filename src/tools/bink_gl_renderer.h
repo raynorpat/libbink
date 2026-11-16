@@ -7,7 +7,9 @@ int bink_gl_prepare(void);
 BinkRenderer *bink_gl_renderer_create(void *window, unsigned long w,
                                       unsigned long h);
 int bink_gl_renderer_upload(BinkRenderer *r, bink object, int slot);
-int bink_gl_renderer_upload_motion(BinkRenderer *r, bink object);
+int bink_gl_renderer_upload_motion(BinkRenderer *r, bink object,
+                                   unsigned long *blocks_w,
+                                   unsigned long *blocks_h);
 int bink_gl_renderer_draw(BinkRenderer *r, const BinkRenderParams *params);
 int bink_gl_renderer_readback(BinkRenderer *r, unsigned char *rgb,
                               unsigned long w, unsigned long h);

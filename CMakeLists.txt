@@ -160,6 +160,22 @@ if(BINK_BUILD_TOOLS)
     target_link_libraries(bink_sdlgl_player PRIVATE
       ${BINK_LINK_TARGET} ${BINK_SDL_TARGET})
     if(APPLE)
+      enable_language(OBJC)
+      add_executable(bink_sdlmetal_player src/tools/bink_sdlmetal_player.c
+                     src/tools/bink_metal_renderer.m
+                     src/tools/bink_sdl_player_core.c
+                     src/tools/bink_mix.c src/tools/bink_playback.c
+                     src/tools/bink_playback_sdl.c)
+      bink_set_compile_settings(bink_sdlmetal_player)
+      if(BINK_USE_SDL3)
+        target_compile_definitions(bink_sdlmetal_player PRIVATE BINK_USE_SDL3=1)
+      endif()
+      target_link_libraries(bink_sdlmetal_player PRIVATE
+        ${BINK_LINK_TARGET} ${BINK_SDL_TARGET}
+        "-framework Metal" "-framework QuartzCore" "-framework Foundation")
+      message(STATUS "bink_sdlmetal_player: Metal on ${BINK_SDL_TARGET}")
+    endif()
+    if(APPLE)
       # OpenGL is deprecated on macOS; the API still works and the entry
       # points are loaded at run time, so only the header warnings are
       # worth silencing.

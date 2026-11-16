@@ -291,7 +291,8 @@ int bink_player_run(int argc, char **argv,
         if (status == BINK_MORE || status == BINK_LAST) {
             upload_slot(renderer, backend, b, 1, w, h);
             has_next = 1;
-            if (backend->upload_motion(renderer, b) != 0) {
+            if (backend->upload_motion(renderer, b, &blocks_w,
+                                              &blocks_h) != 0) {
                 fprintf(stderr, "No motion field; interpolation off.\n");
                 interp = 0;
             }
@@ -367,7 +368,8 @@ int bink_player_run(int argc, char **argv,
                         status = next_status;
                         upload_slot(renderer, backend, b, cur ^ 1, w, h);
                         has_next = 1;
-                        if (backend->upload_motion(renderer, b) != 0) {
+                        if (backend->upload_motion(renderer, b, &blocks_w,
+                                              &blocks_h) != 0) {
                             fprintf(stderr,
                                     "No motion field; interpolation off.\n");
                             interp = 0;
@@ -456,7 +458,8 @@ int bink_player_run(int argc, char **argv,
                 if (status == BINK_MORE || status == BINK_LAST) {
                     upload_slot(renderer, backend, b, cur ^ 1, w, h);
                     has_next = 1;
-                    if (backend->upload_motion(renderer, b) != 0) {
+                    if (backend->upload_motion(renderer, b, &blocks_w,
+                                              &blocks_h) != 0) {
                         fprintf(stderr, "No motion field; interpolation off.\n");
                         interp = 0;
                     }
