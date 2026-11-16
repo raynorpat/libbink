@@ -93,6 +93,10 @@ Full documentation is in `docs/usage.md`.
   the Vulkan headers, loader and shaderc are found; on macOS it runs
   through MoltenVK (`brew install vulkan-loader molten-vk shaderc`), and
   `BINK_VULKAN_LIBRARY` points at the loader when SDL cannot find it.
+  On Linux install `libvulkan-dev` and `libshaderc-dev`; on Windows the
+  Vulkan SDK plus an SDL2/SDL3 CMake package. Cross-compiling needs
+  `-DSDL3_DIR=...` (or `SDL2_DIR`) so CMake does not pick up the host's
+  SDL.
 - `bink_sdlgl_player video.bik` - the same controls on an OpenGL 3.2 window.
   The YUV to RGB conversion runs in a GLSL shader, and `M` switches to a
   second shader that interpolates between decoded frames using the

@@ -509,21 +509,27 @@ BinkRenderer *bink_vulkan_renderer_create(void *window, unsigned long w,
     r->h = h;
 
     if (SDL_Vulkan_LoadLibrary(NULL) != 0) {
-        /* SDL looks for a bare library name, which a Homebrew install does
-         * not resolve without a path. */
-        static const char *const fallbacks[] = {
-            "/opt/homebrew/lib/libvulkan.dylib",
-            "/usr/local/lib/libvulkan.dylib",
-            NULL
-        };
         const char *env = getenv("BINK_VULKAN_LIBRARY");
         int loaded = 0;
-        int i;
 
         if (env != NULL && env[0] != '\0')
             loaded = SDL_Vulkan_LoadLibrary(env) == 0;
-        for (i = 0; !loaded && fallbacks[i] != NULL; i++)
-            loaded = SDL_Vulkan_LoadLibrary(fallbacks[i]) == 0;
+#ifdef __APPLE__
+        /* SDL looks for a bare library name, which a Homebrew install does
+         * not resolve without a path. Linux and Windows installs are on the
+         * loader's default search path. */
+        if (!loaded) {
+            static const char *const fallbacks[] = {
+                "/opt/homebrew/lib/libvulkan.dylib",
+                "/usr/local/lib/libvulkan.dylib",
+                NULL
+            };
+            int i;
+
+            for (i = 0; !loaded && fallbacks[i] != NULL; i++)
+                loaded = SDL_Vulkan_LoadLibrary(fallbacks[i]) == 0;
+        }
+#endif
         if (!loaded) {
             fprintf(stderr,
                     "Cannot load Vulkan; set BINK_VULKAN_LIBRARY to the "
@@ -575,11 +581,15 @@ BinkRenderer *bink_vulkan_renderer_create(void *window, unsigned long w,
         uint32_t count = extension_count > 8 ? 8 : extension_count;
         VkInstanceCreateFlags flags = 0;
 
-#ifdef VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME
+#if defined(__APPLE__) && defined(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME)
+        /* MoltenVK needs the portability enumeration flag; the loader does
+         * not advertise the extension elsewhere. */
         if (count < 8) {
             extensions[count++] = VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME;
             flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
         }
+#else
+        (void)flags;
 #endif
         memset(&app, 0, sizeof(app));
         app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;

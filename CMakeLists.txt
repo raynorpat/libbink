@@ -103,8 +103,10 @@ if(BINK_BUILD_TOOLS)
 
   # The SDL player is optional: prefer SDL3, fall back to SDL2, and skip the
   # example rather than breaking the rest of the tool build.
-  if(CMAKE_CROSSCOMPILING)
-    message(STATUS "Cross-compiling: skipping the SDL players.")
+  if(CMAKE_CROSSCOMPILING AND NOT DEFINED SDL3_DIR AND NOT DEFINED SDL2_DIR)
+    # find_package would pick up the host's SDL and produce a broken target.
+    # A cross build that supplies SDL3_DIR or SDL2_DIR for the target is fine.
+    message(STATUS "Cross-compiling without an SDL package path: skipping the SDL players.")
   else()
   if(NOT BINK_SDL_VERSION MATCHES "^(AUTO|2|3)$")
     message(FATAL_ERROR
@@ -174,9 +176,14 @@ if(BINK_BUILD_TOOLS)
       endif()
       target_include_directories(bink_sdlvulkan_player PRIVATE ${SHADERC_INCLUDE})
       target_link_libraries(bink_sdlvulkan_player PRIVATE
-        ${BINK_LINK_TARGET} ${BINK_SDL_TARGET} Vulkan::Vulkan ${SHADERC_LIBRARY}
-        c++)
+        ${BINK_LINK_TARGET} ${BINK_SDL_TARGET} Vulkan::Vulkan ${SHADERC_LIBRARY})
+      if(SHADERC_LIBRARY MATCHES "\\.a$" AND APPLE)
+        # The static build is C++ and needs its runtime named explicitly.
+        target_link_libraries(bink_sdlvulkan_player PRIVATE c++)
+      endif()
       message(STATUS "bink_sdlvulkan_player: Vulkan and shaderc found")
+      # Linux: libvulkan-dev and libshaderc-dev. Windows: the Vulkan SDK
+      # plus an SDL2/SDL3 CMake package.
     else()
       message(STATUS "Vulkan or shaderc not found; skipping bink_sdlvulkan_player")
     endif()
