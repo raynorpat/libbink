@@ -39,6 +39,8 @@ int bink_audio_create(BinkAudio **out, unsigned long rate, int channels,
  * Cosine table for the forward DCT-II of one DCT block:
  * tab[k * frame_len + t] = cos(pi / frame_len * (t + 0.5) * k).
  * Returns frame_len * frame_len floats, or NULL. Free with free().
+ * The size is quadratic: 4 MB at frame_len 1024 and 16 MB at 2048, so a
+ * caller that opens several tracks holds one table per track.
  */
 float *bink_audio_dct_table(int frame_len);
 /**

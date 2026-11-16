@@ -43,114 +43,37 @@ const int32_t *bink_enc_inter_quant(int index)
 /* Forward transform                                                    */
 /* ------------------------------------------------------------------ */
 
-/* Ideal real-valued version of the decoder's 8-point column transform. */
-static void dct_col(const double s[8], double out[8])
-{
-    double a0 = s[0] + s[4];
-    double a1 = s[0] - s[4];
-    double a2 = s[2] + s[6];
-    double a3 = DCT_A1 * (s[2] - s[6]);
-    double a4 = s[5] + s[3];
-    double a5 = s[5] - s[3];
-    double a6 = s[1] + s[7];
-    double a7 = s[1] - s[7];
-    double b0 = a4 + a6;
-    double b1 = DCT_A3 * (a5 + a7);
-    double b2 = DCT_A4 * a5 - b0 + b1;
-    double b3 = DCT_A1 * (a6 - a4) - b2;
-    double b4 = DCT_A2 * a7 + b3 - b1;
-
-    out[0] = a0 + a2 + b0;
-    out[1] = a1 + a3 - a2 + b2;
-    out[2] = a1 - a3 + a2 + b3;
-    out[3] = a0 - a2 - b4;
-    out[4] = a0 - a2 + b4;
-    out[5] = a1 - a3 + a2 - b3;
-    out[6] = a1 + a3 - a2 - b2;
-    out[7] = a0 + a2 - b0;
-}
-
-static int dct_invert(const double src[8][8], double inv[8][8])
-{
-    double a[8][16];
-    int row;
-    int col;
-    int i;
-
-    for (row = 0; row < 8; row++) {
-        for (col = 0; col < 8; col++) {
-            a[row][col] = src[row][col];
-            a[row][8 + col] = (row == col) ? 1.0 : 0.0;
-        }
-    }
-    for (col = 0; col < 8; col++) {
-        int pivot = col;
-        double scale;
-
-        for (row = col + 1; row < 8; row++) {
-            if (fabs(a[row][col]) > fabs(a[pivot][col]))
-                pivot = row;
-        }
-        if (fabs(a[pivot][col]) < 1.0e-12)
-            return -1;
-        if (pivot != col) {
-            for (i = 0; i < 16; i++) {
-                double tmp = a[col][i];
-
-                a[col][i] = a[pivot][i];
-                a[pivot][i] = tmp;
-            }
-        }
-        scale = 1.0 / a[col][col];
-        for (i = 0; i < 16; i++)
-            a[col][i] *= scale;
-        for (row = 0; row < 8; row++) {
-            double factor;
-
-            if (row == col)
-                continue;
-            factor = a[row][col];
-            if (factor == 0.0)
-                continue;
-            for (i = 0; i < 16; i++)
-                a[row][i] -= factor * a[col][i];
-        }
-    }
-    for (row = 0; row < 8; row++) {
-        for (col = 0; col < 8; col++)
-            inv[row][col] = a[row][8 + col];
-    }
-    return 0;
-}
-
-static double dct_ci[8][8];
-/* Single-threaded encoder; see design doc. Built on first use. */
-static int dct_ready;
-
-static int dct_init(void)
-{
-    double c[8][8];
-    int f;
-    int s;
-
-    if (dct_ready)
-        return 0;
-    for (f = 0; f < 8; f++) {
-        double unit[8];
-        double out[8];
-        int i;
-
-        for (i = 0; i < 8; i++)
-            unit[i] = (i == f) ? 1.0 : 0.0;
-        dct_col(unit, out);
-        for (s = 0; s < 8; s++)
-            c[s][f] = out[s];
-    }
-    if (dct_invert(c, dct_ci) != 0)
-        return -1;
-    dct_ready = 1;
-    return 0;
-}
+/* Inverse of the ideal real-valued decoder column transform. That transform
+ * is `dct_col` over the decoder's fixed-point IDCT constants scaled by 2048;
+ * `dct_ci` is its 8x8 inverse, taken once by Gauss-Jordan elimination and
+ * frozen here so the transform needs no lazy initialization (and no lock).
+ * test_dct_roundtrip pins the values end to end: if any digit were wrong,
+ * blocks would not reconstruct. */
+static const double dct_ci[8][8] = {
+    {0.12499999999999996, 0.12500000000000003, 0.12499999999999999, 0.125,
+     0.12500000000000003, 0.12499999999999994, 0.125,
+     0.12500000000000003},
+    {0.24048886866918079, 0.2038866587244294, 0.13625364261161108,
+     0.047855852556362453, -0.04785585255636244, -0.13625364261161102,
+     -0.20388665872442943, -0.24048886866918076},
+    {0.21339779005524856, 0.088397790055248657, -0.088397790055248615,
+     -0.21339779005524859, -0.21339779005524864, -0.088397790055248587,
+     0.088397790055248615, 0.21339779005524862},
+    {0.17282533224223209, -0.040572457813016514, -0.20388665872442943,
+     -0.11548886866918082, 0.11548886866918079, 0.20388665872442938,
+     0.040572457813016549, -0.17282533224223212},
+    {0.125, -0.125, -0.12500000000000003, 0.125, 0.125,
+     -0.12499999999999999, -0.125, 0.12500000000000003},
+    {0.07717466775776792, -0.13622312229748074, 0.027091078613932149,
+     0.11548886866918076, -0.11548886866918077, -0.027091078613932177,
+     0.13622312229748074, -0.077174667757767906},
+    {0.036602209944751385, -0.088397790055248629, 0.088397790055248601,
+     -0.036602209944751378, -0.036602209944751385, 0.088397790055248615,
+     -0.088397790055248629, 0.036602209944751399},
+    {0.0095111313308192252, -0.027091078613932167, 0.040541937498886176,
+     -0.047855852556362426, 0.04785585255636244, -0.040541937498886176,
+     0.027091078613932156, -0.0095111313308192235}
+};
 
 static void fdct_block(const int16_t pixels[64], double coef[64])
 {
@@ -160,10 +83,6 @@ static void fdct_block(const int16_t pixels[64], double coef[64])
     int col;
     int k;
 
-    if (dct_init() != 0) {
-        memset(coef, 0, 64 * sizeof(coef[0]));
-        return;
-    }
     for (row = 0; row < 8; row++) {
         for (col = 0; col < 8; col++)
             m[row][col] = 256.0 * (double)pixels[row * 8 + col];

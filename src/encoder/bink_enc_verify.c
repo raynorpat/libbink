@@ -9,8 +9,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define MAX_ERROR 32
-#define MAX_RMSE 5.0
+/* Per-plane tolerance: exact output passes trivially, DCT blocks must stay
+ * inside these caps. */
+static const int MAX_ERROR = 32;
+static const double MAX_RMSE = 5.0;
 
 static bink_enc_status fail(char *err, size_t errlen, const char *message)
 {
@@ -69,6 +71,11 @@ static int planes_within_tolerance(const bink movie, const uint8_t *y,
                     max_error = error;
                 sum += (double)diff * (double)diff;
             }
+        }
+        if (count == 0) {
+            if (err != NULL && errlen > 0)
+                snprintf(err, errlen, "%s plane is empty", names[i]);
+            return 0;
         }
         rmse = sqrt(sum / (double)count);
         if (max_error > MAX_ERROR || rmse > MAX_RMSE) {

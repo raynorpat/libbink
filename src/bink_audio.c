@@ -679,8 +679,9 @@ int bink_audio_write_dct_block(BinkBitWriter *bw, const BinkAudioInfo *info,
     static const unsigned char rle_length[16] = {
         2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15, 16, 32, 64
     };
-    double *coef;
-    int *qidx;
+    /* Two work arrays per block: 48 kB of stack at the maximum frame. */
+    double coef[BINK_AUDIO_MAX_FRAME];
+    int qidx[BINK_AUDIO_MAX_FRAME];
     int band_q[25];
     int floor_q;
     int ch;
@@ -692,10 +693,8 @@ int bink_audio_write_dct_block(BinkBitWriter *bw, const BinkAudioInfo *info,
         info->channels > 2 || out[0] == NULL || info->num_bands < 1 ||
         info->num_bands > 25)
         return -1;
-    coef = (double *)malloc((size_t)info->frame_len * sizeof(*coef));
-    qidx = (int *)malloc((size_t)info->frame_len * sizeof(*qidx));
-    if (coef == NULL || qidx == NULL || bink_bw_put(bw, 0, 2) != 0)
-        goto fail;
+    if (bink_bw_put(bw, 0, 2) != 0)
+        return -1;
 
     for (ch = 0; ch < info->channels; ch++) {
         const float *src = out[ch];
@@ -843,11 +842,7 @@ int bink_audio_write_dct_block(BinkBitWriter *bw, const BinkAudioInfo *info,
             i = j;
         }
     }
-    free(coef);
-    free(qidx);
     return 0;
 fail:
-    free(coef);
-    free(qidx);
     return -1;
 }
