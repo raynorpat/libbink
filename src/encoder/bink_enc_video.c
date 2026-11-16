@@ -240,37 +240,49 @@ static const int32_t *block_quant(const EncBlock *block)
                                     : bink_enc_intra_quant(block->quant);
 }
 
-/* Scores one DCT candidate. pred is NULL for intra and points at the 8x8
- * predictor for inter. Block caps are enforced here, so a returned bit count
- * is a candidate we could actually emit. Returns estimated bits, or -1. */
-static int score_dct(const uint8_t desired[64], const uint8_t *pred,
-                     const int32_t *quant, int q, EncBlock *block,
-                     int *maxerr, double *rmse)
+/* Clamp the difference to what the decoder's unsigned add can represent. */
+static void build_residual(const uint8_t desired[64], const uint8_t pred[64],
+                           int16_t residual[64])
 {
-    double coef[64];
+    int i;
+
+    for (i = 0; i < 64; i++) {
+        int value = (int)desired[i] - (int)pred[i];
+
+        if (value < -(int)pred[i])
+            value = -(int)pred[i];
+        if (value > 255 - (int)pred[i])
+            value = 255 - (int)pred[i];
+        residual[i] = (int16_t)value;
+    }
+}
+
+/* The best DCT candidate for one block so far. kind is 0 for raw. */
+typedef struct {
+    int bits;
+    int maxerr;
+    int kind;
+    EncBlock block;
+} BestDct;
+
+/* Scores one quantized candidate. `coef` is the forward transform of the
+ * intra block, or of the residual when pred is not NULL. Distortion is
+ * measured on the block's visible pixels only, and the caps are enforced
+ * here, so a returned bit count is a candidate that could be emitted.
+ * Returns estimated bits, or -1. */
+static int score_dct(const uint8_t desired[64], const uint8_t *pred,
+                     const double coef[64], const int32_t *quant, int q,
+                     int plane_w, int plane_h, int bx, int by,
+                     EncBlock *block, int *maxerr)
+{
     int32_t recon[64];
     uint8_t out[64];
-    int i;
-    int bits;
     unsigned maxe = 0;
+    unsigned count = 0;
     double sum = 0.0;
-
-    if (pred != NULL) {
-        int16_t residual[64];
-
-        for (i = 0; i < 64; i++) {
-            int value = (int)desired[i] - (int)pred[i];
-
-            if (value < -(int)pred[i])
-                value = -(int)pred[i];
-            if (value > 255 - (int)pred[i])
-                value = 255 - (int)pred[i];
-            residual[i] = (int16_t)value;
-        }
-        bink_enc_fdct_signed(residual, coef);
-    } else {
-        bink_enc_fdct(desired, coef);
-    }
+    int bits;
+    int dy;
+    int dx;
 
     if (bink_enc_quantize(coef, quant, block->t) != 0)
         return -1;
@@ -293,15 +305,27 @@ static int score_dct(const uint8_t desired[64], const uint8_t *pred,
     } else {
         bink_idct_put(out, 8, recon);
     }
-    for (i = 0; i < 64; i++) {
-        int diff = (int)out[i] - (int)desired[i];
-        unsigned error = (unsigned)(diff < 0 ? -diff : diff);
+    for (dy = 0; dy < 8; dy++) {
+        int y = by * 8 + dy;
 
-        if (error > maxe)
-            maxe = error;
-        sum += (double)diff * (double)diff;
+        if (y >= plane_h)
+            continue;
+        for (dx = 0; dx < 8; dx++) {
+            int x = bx * 8 + dx;
+            int diff;
+            unsigned error;
+
+            if (x >= plane_w)
+                continue;
+            diff = (int)out[dy * 8 + dx] - (int)desired[dy * 8 + dx];
+            error = (unsigned)(diff < 0 ? -diff : diff);
+            if (error > maxe)
+                maxe = error;
+            sum += (double)diff * (double)diff;
+            count++;
+        }
     }
-    if (maxe > 24 || sum / 64.0 > 4.0 * 4.0)
+    if (count == 0 || maxe > 24 || sum / (double)count > 4.0 * 4.0)
         return -1;
 
     block->cbits = (uint8_t)bink_enc_cbits(block->t);
@@ -312,8 +336,49 @@ static int score_dct(const uint8_t desired[64], const uint8_t *pred,
     /* DC costs 11 bits intra; inter adds a 10-bit DC and a 16-bit vector. */
     bits += pred != NULL ? 10 + 16 : 11;
     *maxerr = (int)maxe;
-    *rmse = sqrt(sum / 64.0);
     return bits;
+}
+
+/* Keep a candidate when it is cheaper, or equally cheap and less distorted. */
+static void consider_candidate(BestDct *best, const EncBlock *candidate,
+                               int kind, int bits, int maxerr)
+{
+    if (bits < 0)
+        return;
+    if (bits > best->bits || (bits == best->bits && maxerr >= best->maxerr))
+        return;
+    best->bits = bits;
+    best->maxerr = maxerr;
+    best->kind = kind;
+    best->block = *candidate;
+}
+
+/* Test hook: score one inter candidate on a full visible block and report
+ * whether the residual DC fits the 10-bit bundle value. */
+int bink_enc_video_score_inter(const uint8_t desired[64], const uint8_t pred[64],
+                               int q, int16_t t[64])
+{
+    const int32_t *quant;
+    int16_t residual[64];
+    double coef[64];
+    EncBlock block;
+    int maxerr = 0;
+    int bits;
+
+    if (q < 0 || q > 15)
+        return -1;
+    quant = bink_enc_inter_quant(q);
+    if (quant == NULL)
+        return -1;
+    build_residual(desired, pred, residual);
+    bink_enc_fdct_signed(residual, coef);
+    memset(&block, 0, sizeof(block));
+    bits = score_dct(desired, pred, coef, quant, q, 8, 8, 0, 0, &block,
+                     &maxerr);
+    if (bits < 0)
+        return -1;
+    memcpy(t, block.t, sizeof(block.t));
+    return 0;
 }
 
 /* Sum of squared differences over the visible pixels of one block. */
@@ -643,19 +708,22 @@ static int emit_dcs(BinkBitWriter *bw, const uint8_t *bytes, size_t count,
         int first = values[0];
         int mag = first < 0 ? -first : first;
 
+        /* Validate on both passes, so a bad DC fails at the count pass
+         * rather than halfway through a written plane. */
+        if (has_sign) {
+            if (mag > 1023)
+                return -1;
+        } else if (mag > 2047 || first < 0) {
+            return -1;
+        }
         if (state->write) {
             if (has_sign) {
-                if (mag > 1023)
-                    return -1;
                 if (bink_bw_put(bw, (unsigned)mag, 10) != 0)
                     return -1;
                 if (mag && bink_bw_put(bw, (unsigned)(first < 0), 1) != 0)
                     return -1;
-            } else {
-                if (mag > 2047 || first < 0)
-                    return -1;
-                if (bink_bw_put(bw, (unsigned)first, 11) != 0)
-                    return -1;
+            } else if (bink_bw_put(bw, (unsigned)first, 11) != 0) {
+                return -1;
             }
         }
         pos = 1;
@@ -1026,74 +1094,65 @@ static int encode_plane(BinkBitWriter *bw, const uint8_t *src, int src_stride,
                 } else {
                     /* Three or more values: raw is the safe fallback; intra and
                      * (on P-frames) inter DCT blocks win when cheaper within
-                     * the caps. */
+                     * the caps. Each transform runs once; only the quantizer
+                     * varies across candidates. */
                     static const int quants[8] = { 0, 2, 4, 6, 8, 10, 12, 14 };
+                    double coef_intra[64];
+                    double coef_inter[64];
                     uint8_t predicted[64];
+                    int16_t residual[64];
                     int have_pred = 0;
-                    int best_bits = 512; /* open-coded raw block cost */
-                    int best_maxerr = 256;
-                    int best_kind = 0; /* 0 raw, 1 intra, 2 inter */
+                    BestDct best;
                     int qi;
 
+                    memset(&best, 0, sizeof(best));
+                    best.bits = 512; /* open-coded raw block cost */
+                    best.maxerr = 256;
                     if (have_ref && motion_in_range(bx, by, best_mx, best_my,
                                                     blocks_x, blocks_y, stride,
                                                     alloc_h)) {
                         copy_predicted(predicted, ref, stride, bx, by, best_mx,
                                        best_my);
+                        build_residual(desired, predicted, residual);
+                        bink_enc_fdct_signed(residual, coef_inter);
                         have_pred = 1;
                     }
+                    bink_enc_fdct(desired, coef_intra);
                     for (qi = 0; qi < 8; qi++) {
                         EncBlock candidate;
-                        int maxerr;
-                        double rmse;
+                        int maxerr = 0;
                         int bits;
 
                         memset(&candidate, 0, sizeof(candidate));
-                        maxerr = 0;
-                        rmse = 0.0;
-                        bits = score_dct(desired, NULL,
+                        bits = score_dct(desired, NULL, coef_intra,
                                          bink_enc_intra_quant(quants[qi]),
-                                         quants[qi], &candidate, &maxerr,
-                                         &rmse);
-                        if (bits >= 0 &&
-                            (bits < best_bits ||
-                             (bits == best_bits && maxerr < best_maxerr))) {
-                            best_bits = bits;
-                            best_maxerr = maxerr;
-                            best_kind = 1;
-                            memcpy(block->t, candidate.t, sizeof(block->t));
-                            block->quant = candidate.quant;
-                            block->cbits = candidate.cbits;
-                        }
+                                         quants[qi], plane_w, plane_h, bx, by,
+                                         &candidate, &maxerr);
+                        consider_candidate(&best, &candidate, INTRA_BLOCK, bits,
+                                           maxerr);
                         if (!have_pred)
                             continue;
                         memset(&candidate, 0, sizeof(candidate));
                         maxerr = 0;
-                        rmse = 0.0;
-                        bits = score_dct(desired, predicted,
+                        bits = score_dct(desired, predicted, coef_inter,
                                          bink_enc_inter_quant(quants[qi]),
-                                         quants[qi], &candidate, &maxerr,
-                                         &rmse);
-                        if (bits >= 0 &&
-                            (bits < best_bits ||
-                             (bits == best_bits && maxerr < best_maxerr))) {
-                            best_bits = bits;
-                            best_maxerr = maxerr;
-                            best_kind = 2;
-                            memcpy(block->t, candidate.t, sizeof(block->t));
-                            block->quant = candidate.quant;
-                            block->cbits = candidate.cbits;
-                        }
+                                         quants[qi], plane_w, plane_h, bx, by,
+                                         &candidate, &maxerr);
+                        consider_candidate(&best, &candidate, INTER_BLOCK, bits,
+                                           maxerr);
                     }
-                    if (best_kind == 0) {
+                    if (best.kind == 0) {
                         block->op = RAW_BLOCK;
                         memcpy(block->raw, desired, 64);
-                    } else if (best_kind == 1) {
-                        block->op = INTRA_BLOCK;
                     } else {
-                        block->op = INTER_BLOCK;
-                        block->mx = (int8_t)best_mx;
-                        block->my = (int8_t)best_my;
+                        block->op = (uint8_t)best.kind;
+                        memcpy(block->t, best.block.t, sizeof(block->t));
+                        block->quant = best.block.quant;
+                        block->cbits = best.block.cbits;
+                        if (best.kind == INTER_BLOCK) {
+                            block->mx = (int8_t)best_mx;
+                            block->my = (int8_t)best_my;
+                        }
                     }
                 }
             }

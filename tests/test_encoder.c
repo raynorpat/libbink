@@ -817,6 +817,131 @@ done:
     return rc;
 }
 
+/* The inter DC bundle carries 10 bits plus a sign, so a residual whose mean
+ * exceeds +/-127 cannot be coded and must be rejected, not truncated. */
+static int test_inter_dc_range(void)
+{
+    uint8_t desired[64];
+    uint8_t pred[64];
+    int16_t t[64];
+    int i;
+
+    for (i = 0; i < 64; i++) {
+        desired[i] = 250;
+        pred[i] = 250;
+    }
+    if (bink_enc_video_score_inter(desired, pred, 0, t) != 0) {
+        fprintf(stderr, "FAIL inter dc: flat residual rejected\n");
+        return 1;
+    }
+    /* A -200 mean residual needs about -1600, well past the 10-bit range. */
+    for (i = 0; i < 64; i++)
+        pred[i] = 50;
+    if (bink_enc_video_score_inter(desired, pred, 0, t) == 0) {
+        fprintf(stderr, "FAIL inter dc: out-of-range residual accepted (t0=%d)\n",
+                t[0]);
+        return 1;
+    }
+    /* And a mild one inside the range must still pass. */
+    for (i = 0; i < 64; i++)
+        pred[i] = 247;
+    if (bink_enc_video_score_inter(desired, pred, 0, t) != 0) {
+        fprintf(stderr, "FAIL inter dc: mild residual rejected\n");
+        return 1;
+    }
+    return 0;
+}
+
+/* Thirty chained P-frames: a drift between the encoder's predictor and the
+ * decoder's reconstruction would show up as growing error or packet size. */
+static int test_inter_chain(void)
+{
+    enum { W = 64, H = 48, N = 30 };
+    uint8_t *frames;
+    mem_source mem;
+    bink_enc_options opt;
+    unsigned long sizes[32];
+    char path[1024];
+    char err[256];
+    bink_enc_status status;
+    uint8_t *y;
+    uint8_t *u;
+    uint8_t *v;
+    size_t frame_bytes = (size_t)W * H * 3;
+    size_t i;
+    int f;
+    bink movie;
+    int rc = 1;
+
+    frames = (uint8_t *)calloc(N, frame_bytes);
+    y = (uint8_t *)malloc((size_t)W * H);
+    u = (uint8_t *)malloc((size_t)(W / 2) * (H / 2));
+    v = (uint8_t *)malloc((size_t)(W / 2) * (H / 2));
+    if (frames == NULL || y == NULL || u == NULL || v == NULL) {
+        fprintf(stderr, "FAIL inter chain: out of memory\n");
+        goto done;
+    }
+    for (i = 0; i < (size_t)W * H; i++) {
+        unsigned px = (unsigned)i % W;
+        unsigned py = (unsigned)i / W;
+        uint8_t *p = frames + i * 3;
+
+        p[0] = (uint8_t)((px * 73 + py * 151 + px * py * 3) & 255);
+        p[1] = (uint8_t)((px * 29 + py * 47 + px * py * 5) & 255);
+        p[2] = (uint8_t)((px * 11 + py * 97 + px * py * 7) & 255);
+    }
+    for (f = 1; f < N; f++) {
+        uint8_t *dst = frames + (size_t)f * frame_bytes;
+
+        memcpy(dst, frames, frame_bytes);
+        for (i = 0; i < frame_bytes; i++) {
+            unsigned value = (unsigned)dst[i] + (unsigned)f;
+
+            dst[i] = (uint8_t)(value > 255 ? 255 : value);
+        }
+    }
+
+    memset(&mem, 0, sizeof(mem));
+    mem.frames = frames;
+    mem.width = W;
+    mem.height = H;
+    mem.count = N;
+    mem.fail_index = -1;
+    bink_enc_options_default(&opt);
+    opt.verify = 1;
+    opt.keyframe_interval = 0;
+    opt.motion_range = 4;
+    path_for(path, sizeof(path), "inter_chain.bik");
+    err[0] = '\0';
+    status = encode_mem(&mem, &opt, path, 0, err, sizeof(err));
+    if (expect_ok(status, err, "inter chain") != 0)
+        goto done;
+    if (packet_sizes_all(path, sizes, 32) != N) {
+        fprintf(stderr, "FAIL inter chain: cannot read packet sizes\n");
+        goto done;
+    }
+    if (sizes[N - 1] > sizes[1] * 2) {
+        fprintf(stderr, "FAIL inter chain: last packet %lu, first P %lu\n",
+                sizes[N - 1], sizes[1]);
+        goto done;
+    }
+    movie = bink_open_file(path, BINK_MODE_DISK);
+    if (movie == NULL) {
+        fprintf(stderr, "FAIL inter chain: decoder rejected the file\n");
+        goto done;
+    }
+    if (decode_within(movie, frames, N, W, H, y, u, v, 24, 4.0))
+        rc = 0;
+    bink_close(movie);
+done:
+    remove(path);
+    free(frames);
+    free(y);
+    free(u);
+    free(v);
+    return rc;
+}
+
 static int test_dct_roundtrip(void)
 {
     /* gradient, hard edge, flat, and pseudo-random blocks */
@@ -2233,6 +2358,10 @@ int main(void)
     if (test_inter_dct_no_motion_search() != 0)
         return 1;
     if (test_inter_wrap_safety() != 0)
+        return 1;
+    if (test_inter_dc_range() != 0)
+        return 1;
+    if (test_inter_chain() != 0)
         return 1;
     if (test_dct_roundtrip() != 0)
         return 1;
