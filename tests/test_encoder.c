@@ -10,6 +10,7 @@
 #include "test_common.h"
 
 #include <errno.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -172,6 +173,67 @@ static int expect_ok(bink_enc_status status, const char *err, const char *what)
     return 1;
 }
 
+/* Decoded planes against the expected planes, with the encoder's block caps. */
+static int planes_within(const bink movie, const uint8_t *y, const uint8_t *u,
+                         const uint8_t *v, unsigned width, unsigned height,
+                         unsigned max_error_cap, double rmse_cap)
+{
+    static const char *const names[3] = { "Y", "U", "V" };
+    const unsigned char *planes[3];
+    const uint8_t *expect[3];
+    unsigned cw = (width + 1) >> 1;
+    unsigned ch = (height + 1) >> 1;
+    unsigned dims[3][2];
+    int i;
+
+    planes[0] = bink_get_plane(movie, BINK_PLANE_Y);
+    planes[1] = bink_get_plane(movie, BINK_PLANE_U);
+    planes[2] = bink_get_plane(movie, BINK_PLANE_V);
+    expect[0] = y;
+    expect[1] = u;
+    expect[2] = v;
+    dims[0][0] = width;
+    dims[0][1] = height;
+    dims[1][0] = cw;
+    dims[1][1] = ch;
+    dims[2][0] = cw;
+    dims[2][1] = ch;
+    for (i = 0; i < 3; i++) {
+        int stride = bink_get_stride(movie, i);
+        unsigned row;
+        unsigned col;
+        unsigned count = dims[i][0] * dims[i][1];
+        unsigned max_error = 0;
+        double sum = 0.0;
+        double rmse;
+
+        if (planes[i] == NULL || stride <= 0 || count == 0) {
+            fprintf(stderr, "FAIL %s plane is unavailable\n", names[i]);
+            return 0;
+        }
+        for (row = 0; row < dims[i][1]; row++) {
+            for (col = 0; col < dims[i][0]; col++) {
+                int diff =
+                    (int)planes[i][(size_t)row * (size_t)stride + col] -
+                    (int)expect[i][(size_t)row * dims[i][0] + col];
+                unsigned error = (unsigned)(diff < 0 ? -diff : diff);
+
+                if (error > max_error)
+                    max_error = error;
+                sum += (double)diff * (double)diff;
+            }
+        }
+        rmse = sqrt(sum / (double)count);
+        if (max_error > max_error_cap || rmse > rmse_cap) {
+            fprintf(stderr,
+                    "FAIL %s plane exceeds tolerance (max error %u, RMSE %.2f)\n",
+                    names[i], max_error, rmse);
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static int test_still(const char *name, const uint8_t *rgb, unsigned width,
                       unsigned height)
 {
@@ -330,6 +392,86 @@ static int test_skip_and_motion(void)
         return 1;
     remove(path);
     return 0;
+}
+
+static int test_intra_dct(void)
+{
+    enum { W = 64, H = 48 };
+    mem_source mem;
+    bink_enc_options opt;
+    char path[1024];
+    char err[256];
+    bink_enc_status status;
+    uint8_t *rgb = (uint8_t *)malloc((size_t)W * H * 3);
+    uint8_t *y = (uint8_t *)malloc((size_t)W * H);
+    uint8_t *u = (uint8_t *)malloc((size_t)(W / 2) * (H / 2));
+    uint8_t *v = (uint8_t *)malloc((size_t)(W / 2) * (H / 2));
+    unsigned x;
+    unsigned yy;
+    bink movie;
+    struct stat st;
+    char frame_status;
+    int rc = 1;
+
+    if (rgb == NULL || y == NULL || u == NULL || v == NULL) {
+        fprintf(stderr, "FAIL intra dct: out of memory\n");
+        goto done;
+    }
+    for (yy = 0; yy < H; yy++) {
+        for (x = 0; x < W; x++) {
+            size_t p = ((size_t)yy * W + x) * 3;
+
+            rgb[p + 0] = (uint8_t)(x * 3 + yy);
+            rgb[p + 1] = (uint8_t)(x + yy * 2);
+            rgb[p + 2] = (uint8_t)(255 - x - yy);
+        }
+    }
+    memset(&mem, 0, sizeof(mem));
+    mem.frames = rgb;
+    mem.width = W;
+    mem.height = H;
+    mem.count = 1;
+    mem.fail_index = -1;
+    bink_enc_options_default(&opt);
+    opt.motion_range = 0;
+    path_for(path, sizeof(path), "intra_dct.bik");
+    err[0] = '\0';
+    status = encode_mem(&mem, &opt, path, 0, err, sizeof(err));
+    if (expect_ok(status, err, "intra dct") != 0)
+        goto done;
+    if (stat(path, &st) != 0) {
+        fprintf(stderr, "FAIL intra dct: no output file\n");
+        goto done;
+    }
+    /* A lossless fallback costs about W*H + 2*(W/2)*(H/2) bytes of block data. */
+    if ((long)st.st_size >= (long)(W * H + 2 * (W / 2) * (H / 2))) {
+        fprintf(stderr, "FAIL intra dct: file is %ld bytes, not smaller than raw\n",
+                (long)st.st_size);
+        goto done;
+    }
+    movie = bink_open_file(path, BINK_MODE_DISK);
+    if (movie == NULL) {
+        fprintf(stderr, "FAIL intra dct: decoder rejected the file\n");
+        goto done;
+    }
+    bink_enc_rgb_to_yuv(rgb, W, H, y, u, v);
+    frame_status = bink_enable_video(movie, 1) != 0 ? 0 : bink_first(movie);
+    if (frame_status != BINK_MORE && frame_status != BINK_LAST) {
+        fprintf(stderr, "FAIL intra dct: cannot decode the first frame\n");
+        goto close_movie;
+    }
+    if (!planes_within(movie, y, u, v, W, H, 24, 4.0))
+        goto close_movie;
+    rc = 0;
+close_movie:
+    bink_close(movie);
+done:
+    remove(path);
+    free(rgb);
+    free(y);
+    free(u);
+    free(v);
+    return rc;
 }
 
 static int test_dct_roundtrip(void)
@@ -1167,6 +1309,8 @@ int main(void)
     if (test_pictures() != 0)
         return 1;
     if (test_skip_and_motion() != 0)
+        return 1;
+    if (test_intra_dct() != 0)
         return 1;
     if (test_dct_roundtrip() != 0)
         return 1;

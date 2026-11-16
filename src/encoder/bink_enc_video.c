@@ -1,8 +1,10 @@
 #include "bink_enc_video.h"
 
 #include "bink_dsp.h"
+#include "bink_enc_dct.h"
 #include "bink_video.h"
 
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -137,6 +139,12 @@ typedef struct {
     uint8_t raw[64];
     int8_t mx;
     int8_t my;
+    /* DCT candidates: quantized coefficients in scan order, the quantizer
+     * index, and the number of coded planes. The unquantized block is
+     * recovered at paint time so large frames stay inside the memory cap. */
+    int16_t t[64];
+    uint8_t quant;
+    uint8_t cbits;
 } EncBlock;
 
 static int buf_push(ByteBuf *buf, uint8_t value)
@@ -225,6 +233,89 @@ static int visible_match(const uint8_t desired[64], const uint8_t *ref,
     return 1;
 }
 
+/* Quantizer table a painted block was coded with. */
+static const int32_t *block_quant(const EncBlock *block)
+{
+    return block->op == INTER_BLOCK ? bink_enc_inter_quant(block->quant)
+                                    : bink_enc_intra_quant(block->quant);
+}
+
+/* Scores one DCT candidate. pred is NULL for intra and points at the 8x8
+ * predictor for inter. Block caps are enforced here, so a returned bit count
+ * is a candidate we could actually emit. Returns estimated bits, or -1. */
+static int score_dct(const uint8_t desired[64], const uint8_t *pred,
+                     const int32_t *quant, int q, EncBlock *block,
+                     int *maxerr, double *rmse)
+{
+    double coef[64];
+    int32_t recon[64];
+    uint8_t out[64];
+    int i;
+    int bits;
+    unsigned maxe = 0;
+    double sum = 0.0;
+
+    if (pred != NULL) {
+        int16_t residual[64];
+
+        for (i = 0; i < 64; i++) {
+            int value = (int)desired[i] - (int)pred[i];
+
+            if (value < -(int)pred[i])
+                value = -(int)pred[i];
+            if (value > 255 - (int)pred[i])
+                value = 255 - (int)pred[i];
+            residual[i] = (int16_t)value;
+        }
+        bink_enc_fdct_signed(residual, coef);
+    } else {
+        bink_enc_fdct(desired, coef);
+    }
+
+    if (bink_enc_quantize(coef, quant, block->t) != 0)
+        return -1;
+    if (bink_enc_cbits(block->t) > 15)
+        return -1;
+    if (pred == NULL) {
+        /* Intra DC is bundled as 11 unsigned bits. */
+        if (block->t[0] < 0 || block->t[0] > 2047)
+            return -1;
+    } else {
+        /* Inter DC is bundled as 10 bits plus a sign. */
+        if (block->t[0] < -1023 || block->t[0] > 1023)
+            return -1;
+    }
+
+    bink_enc_unquantize(block->t, quant, recon);
+    if (pred != NULL) {
+        memcpy(out, pred, 64);
+        bink_idct_add(out, 8, recon);
+    } else {
+        bink_idct_put(out, 8, recon);
+    }
+    for (i = 0; i < 64; i++) {
+        int diff = (int)out[i] - (int)desired[i];
+        unsigned error = (unsigned)(diff < 0 ? -diff : diff);
+
+        if (error > maxe)
+            maxe = error;
+        sum += (double)diff * (double)diff;
+    }
+    if (maxe > 24 || sum / 64.0 > 4.0 * 4.0)
+        return -1;
+
+    block->cbits = (uint8_t)bink_enc_cbits(block->t);
+    block->quant = (uint8_t)q;
+    bits = bink_enc_emit_coeffs(NULL, block->t, block->cbits, q);
+    if (bits < 0)
+        return -1;
+    /* DC costs 11 bits intra; inter adds a 10-bit DC and a 16-bit vector. */
+    bits += pred != NULL ? 10 + 16 : 11;
+    *maxerr = (int)maxe;
+    *rmse = sqrt(sum / 64.0);
+    return bits;
+}
+
 static void paint_block(uint8_t *dst, int stride, const EncBlock *block,
                         const uint8_t *ref, int ref_x, int ref_y)
 {
@@ -250,6 +341,13 @@ static void paint_block(uint8_t *dst, int stride, const EncBlock *block,
     }
     if (block->op == FILL_BLOCK) {
         bink_fill_block(dst, stride, 8, block->c0);
+        return;
+    }
+    if (block->op == INTRA_BLOCK) {
+        int32_t recon[64];
+
+        bink_enc_unquantize(block->t, block_quant(block), recon);
+        bink_idct_put(dst, stride, recon);
         return;
     }
     if (block->op == PATTERN_BLOCK) {
@@ -471,6 +569,89 @@ static int emit_motion(BinkBitWriter *bw, const uint8_t *bytes, size_t count,
     return 0;
 }
 
+/* DC bundle values. The first value in each chunk is absolute; the rest are
+ * deltas in groups of up to eight, each group led by a 4-bit width. Mirrors
+ * bink_bundle_read_dcs in src/bink_video.c. */
+static int emit_dcs(BinkBitWriter *bw, const uint8_t *bytes, size_t count,
+                    SymbolState *state, int has_sign)
+{
+    const int16_t *values = (const int16_t *)(const void *)bytes;
+    size_t pos = 0;
+
+    if (count == 0)
+        return 0;
+    {
+        int first = values[0];
+        int mag = first < 0 ? -first : first;
+
+        if (state->write) {
+            if (has_sign) {
+                if (mag > 1023)
+                    return -1;
+                if (bink_bw_put(bw, (unsigned)mag, 10) != 0)
+                    return -1;
+                if (mag && bink_bw_put(bw, (unsigned)(first < 0), 1) != 0)
+                    return -1;
+            } else {
+                if (mag > 2047 || first < 0)
+                    return -1;
+                if (bink_bw_put(bw, (unsigned)first, 11) != 0)
+                    return -1;
+            }
+        }
+        pos = 1;
+    }
+    while (pos < count) {
+        size_t group = count - pos < 8 ? count - pos : 8;
+        int bsize = 0;
+        size_t i;
+
+        for (i = 0; i < group; i++) {
+            int delta = (int)values[pos + i] - (int)values[pos + i - 1];
+            int mag = delta < 0 ? -delta : delta;
+            int bits = 0;
+
+            while (mag != 0) {
+                bits++;
+                mag >>= 1;
+            }
+            if (bits > bsize)
+                bsize = bits;
+        }
+        if (bsize > 15)
+            return -1;
+        if (state->write && bink_bw_put(bw, (unsigned)bsize, 4) != 0)
+            return -1;
+        if (bsize != 0) {
+            for (i = 0; i < group; i++) {
+                int delta = (int)values[pos + i] - (int)values[pos + i - 1];
+                int mag = delta < 0 ? -delta : delta;
+
+                if (state->write) {
+                    if (bink_bw_put(bw, (unsigned)mag, bsize) != 0)
+                        return -1;
+                    if (mag && bink_bw_put(bw, (unsigned)(delta < 0), 1) != 0)
+                        return -1;
+                }
+            }
+        }
+        pos += group;
+    }
+    return 0;
+}
+
+static int emit_intra_dcs(BinkBitWriter *bw, const uint8_t *bytes,
+                          size_t count, SymbolState *state)
+{
+    return emit_dcs(bw, bytes, count, state, 0);
+}
+
+static int emit_inter_dcs(BinkBitWriter *bw, const uint8_t *bytes,
+                          size_t count, SymbolState *state)
+{
+    return emit_dcs(bw, bytes, count, state, 1);
+}
+
 typedef struct {
     const uint8_t *data;
     const size_t *row_counts;
@@ -481,13 +662,14 @@ typedef struct {
     size_t q_end;
     int dead;
     int len_bits;
+    int item_size;
     int (*emit)(BinkBitWriter *, const uint8_t *, size_t, SymbolState *);
     SymbolState *state;
 } BundleWalk;
 
 static void walk_init(BundleWalk *walk, const uint8_t *data,
                       const size_t *row_counts, const EncChunk *chunks,
-                      int chunk_count, int len_bits,
+                      int chunk_count, int len_bits, int item_size,
                       int (*emit)(BinkBitWriter *, const uint8_t *, size_t,
                                   SymbolState *),
                       SymbolState *state)
@@ -498,6 +680,7 @@ static void walk_init(BundleWalk *walk, const uint8_t *data,
     walk->chunks = chunks;
     walk->chunk_count = chunk_count;
     walk->len_bits = len_bits;
+    walk->item_size = item_size;
     walk->emit = emit;
     walk->state = state;
 }
@@ -534,7 +717,8 @@ static int walk_row(BinkBitWriter *bw, BundleWalk *walk, int row)
             bink_bw_put(bw, (unsigned)walk->chunks[walk->chunk_index].len,
                         walk->len_bits) != 0)
             return -1;
-        if (walk->emit(bw, walk->data + walk->chunks[walk->chunk_index].off,
+        if (walk->emit(bw, walk->data + walk->chunks[walk->chunk_index].off *
+                                        (size_t)walk->item_size,
                        walk->chunks[walk->chunk_index].len, walk->state) != 0)
             return -1;
         walk->q_end += walk->chunks[walk->chunk_index].len;
@@ -561,6 +745,35 @@ static int emit_rows(BinkBitWriter *bw, BundleWalk *walks, int walk_count,
     return 0;
 }
 
+/* Same walk, but each row's DCT coefficient bits follow that row's bundles,
+ * which is where the decoder reads them. */
+static int emit_rows_dct(BinkBitWriter *bw, BundleWalk *walks, int walk_count,
+                         int rows, const EncBlock *blocks, int blocks_x)
+{
+    int row;
+
+    for (row = 0; row < rows; row++) {
+        int i;
+        int bx;
+
+        for (i = 0; i < walk_count; i++) {
+            if (walk_row(bw, &walks[i], row) != 0)
+                return -1;
+        }
+        for (bx = 0; bx < blocks_x; bx++) {
+            const EncBlock *block =
+                &blocks[(size_t)row * (size_t)blocks_x + (size_t)bx];
+
+            if (block->op != INTRA_BLOCK && block->op != INTER_BLOCK)
+                continue;
+            if (bink_enc_emit_coeffs(bw, block->t, block->cbits,
+                                     block->quant) < 0)
+                return -1;
+        }
+    }
+    return 0;
+}
+
 static int encode_plane(BinkBitWriter *bw, const uint8_t *src, int src_stride,
                         uint8_t *dst, const uint8_t *ref, int stride,
                         int alloc_h, int plane_w, int plane_h, int blocks_x,
@@ -571,22 +784,32 @@ static int encode_plane(BinkBitWriter *bw, const uint8_t *src, int src_stride,
     ByteBuf patterns;
     ByteBuf motion_x;
     ByteBuf motion_y;
+    int16_t *intra_dc = NULL;
+    int16_t *inter_dc = NULL;
     uint8_t *types = NULL;
     size_t *color_rows = NULL;
     size_t *pattern_rows = NULL;
     size_t *x_rows = NULL;
     size_t *y_rows = NULL;
     size_t *type_rows = NULL;
+    size_t *intra_rows = NULL;
+    size_t *inter_rows = NULL;
     EncChunk *type_chunks = NULL;
     EncChunk *color_chunks = NULL;
     EncChunk *pattern_chunks = NULL;
     EncChunk *x_chunks = NULL;
     EncChunk *y_chunks = NULL;
+    EncChunk *intra_chunks = NULL;
+    EncChunk *inter_chunks = NULL;
     int type_n = 0;
     int color_n = 0;
     int pattern_n = 0;
     int x_n = 0;
     int y_n = 0;
+    int intra_n = 0;
+    int inter_n = 0;
+    size_t intra_len = 0;
+    size_t inter_len = 0;
     int lens[BINK_NB_SRC];
     int width_arg = plane_w > 8 ? plane_w : 8;
     int by;
@@ -614,14 +837,21 @@ static int encode_plane(BinkBitWriter *bw, const uint8_t *src, int src_stride,
     blocks = (EncBlock *)calloc((size_t)blocks_x * (size_t)blocks_y,
                                 sizeof(*blocks));
     types = (uint8_t *)malloc((size_t)blocks_x * (size_t)blocks_y);
+    intra_dc = (int16_t *)calloc((size_t)blocks_x * (size_t)blocks_y,
+                                 sizeof(*intra_dc));
+    inter_dc = (int16_t *)calloc((size_t)blocks_x * (size_t)blocks_y,
+                                 sizeof(*inter_dc));
     color_rows = (size_t *)calloc((size_t)blocks_y, sizeof(*color_rows));
     pattern_rows = (size_t *)calloc((size_t)blocks_y, sizeof(*pattern_rows));
     x_rows = (size_t *)calloc((size_t)blocks_y, sizeof(*x_rows));
     y_rows = (size_t *)calloc((size_t)blocks_y, sizeof(*y_rows));
     type_rows = (size_t *)calloc((size_t)blocks_y, sizeof(*type_rows));
-    if (blocks == NULL || types == NULL || color_rows == NULL ||
-        pattern_rows == NULL || x_rows == NULL || y_rows == NULL ||
-        type_rows == NULL) {
+    intra_rows = (size_t *)calloc((size_t)blocks_y, sizeof(*intra_rows));
+    inter_rows = (size_t *)calloc((size_t)blocks_y, sizeof(*inter_rows));
+    if (blocks == NULL || types == NULL || intra_dc == NULL ||
+        inter_dc == NULL || color_rows == NULL || pattern_rows == NULL ||
+        x_rows == NULL || y_rows == NULL || type_rows == NULL ||
+        intra_rows == NULL || inter_rows == NULL) {
         failed = 1;
         goto done;
     }
@@ -631,6 +861,8 @@ static int encode_plane(BinkBitWriter *bw, const uint8_t *src, int src_stride,
         size_t pattern_at = patterns.len;
         size_t x_at = motion_x.len;
         size_t y_at = motion_y.len;
+        size_t intra_at = intra_len;
+        size_t inter_at = inter_len;
 
         type_rows[by] = (size_t)blocks_x;
         for (bx = 0; bx < blocks_x; bx++) {
@@ -714,8 +946,38 @@ static int encode_plane(BinkBitWriter *bw, const uint8_t *src, int src_stride,
                         block->pattern[y] = (uint8_t)bits;
                     }
                 } else {
+                    /* Three or more values: raw is the safe fallback, and an
+                     * intra DCT block wins when it is cheaper within the caps. */
+                    static const int quants[8] = { 0, 2, 4, 6, 8, 10, 12, 14 };
+                    int best_bits = 512; /* open-coded raw block cost */
+                    int best_maxerr = 256;
+                    int qi;
+
                     block->op = RAW_BLOCK;
                     memcpy(block->raw, desired, 64);
+                    for (qi = 0; qi < 8; qi++) {
+                        EncBlock candidate;
+                        int maxerr = 0;
+                        double rmse = 0.0;
+                        int bits;
+
+                        memset(&candidate, 0, sizeof(candidate));
+                        bits = score_dct(desired, NULL,
+                                         bink_enc_intra_quant(quants[qi]),
+                                         quants[qi], &candidate, &maxerr,
+                                         &rmse);
+                        if (bits < 0)
+                            continue;
+                        if (bits < best_bits ||
+                            (bits == best_bits && maxerr < best_maxerr)) {
+                            best_bits = bits;
+                            best_maxerr = maxerr;
+                            memcpy(block->t, candidate.t, sizeof(block->t));
+                            block->quant = candidate.quant;
+                            block->cbits = candidate.cbits;
+                            block->op = INTRA_BLOCK;
+                        }
+                    }
                 }
             }
             types[(size_t)by * (size_t)blocks_x + (size_t)bx] = block->op;
@@ -739,6 +1001,8 @@ static int encode_plane(BinkBitWriter *bw, const uint8_t *src, int src_stride,
                 if (buf_push(&motion_x, (uint8_t)block->mx) != 0 ||
                     buf_push(&motion_y, (uint8_t)block->my) != 0)
                     failed = 1;
+            } else if (block->op == INTRA_BLOCK) {
+                intra_dc[intra_len++] = block->t[0];
             }
             if (failed)
                 goto done;
@@ -747,6 +1011,9 @@ static int encode_plane(BinkBitWriter *bw, const uint8_t *src, int src_stride,
         pattern_rows[by] = patterns.len - pattern_at;
         x_rows[by] = motion_x.len - x_at;
         y_rows[by] = motion_y.len - y_at;
+        /* DC bundle rows are counted in values, not bytes. */
+        intra_rows[by] = intra_len - intra_at;
+        inter_rows[by] = inter_len - inter_at;
     }
 
     bink_bundle_init_lengths(lens, width_arg, blocks_x);
@@ -759,7 +1026,11 @@ static int encode_plane(BinkBitWriter *bw, const uint8_t *src, int src_stride,
         plan_chunks(x_rows, blocks_y, lens[BINK_SRC_X_OFF], &x_chunks, &x_n) !=
             0 ||
         plan_chunks(y_rows, blocks_y, lens[BINK_SRC_Y_OFF], &y_chunks, &y_n) !=
-            0) {
+            0 ||
+        plan_chunks(intra_rows, blocks_y, lens[BINK_SRC_INTRA_DC],
+                    &intra_chunks, &intra_n) != 0 ||
+        plan_chunks(inter_rows, blocks_y, lens[BINK_SRC_INTER_DC],
+                    &inter_chunks, &inter_n) != 0) {
         failed = 1;
         goto done;
     }
@@ -776,24 +1047,27 @@ static int encode_plane(BinkBitWriter *bw, const uint8_t *src, int src_stride,
         }
         memset(&unused, 0, sizeof(unused));
         walk_init(&walks[BINK_SRC_BLOCK_TYPES], types, type_rows, type_chunks,
-                  type_n, lens[BINK_SRC_BLOCK_TYPES], emit_types, &types_state);
+                  type_n, lens[BINK_SRC_BLOCK_TYPES], 1, emit_types,
+                  &types_state);
         walk_init(&walks[BINK_SRC_SUB_BLOCK_TYPES], NULL, zeros, NULL, 0,
-                  lens[BINK_SRC_SUB_BLOCK_TYPES], emit_types, &unused);
+                  lens[BINK_SRC_SUB_BLOCK_TYPES], 1, emit_types, &unused);
         walk_init(&walks[BINK_SRC_COLORS], colors.data, color_rows, color_chunks,
-                  color_n, lens[BINK_SRC_COLORS], emit_colors, &color_state);
+                  color_n, lens[BINK_SRC_COLORS], 1, emit_colors, &color_state);
         walk_init(&walks[BINK_SRC_PATTERN], patterns.data, pattern_rows,
-                  pattern_chunks, pattern_n, lens[BINK_SRC_PATTERN],
+                  pattern_chunks, pattern_n, lens[BINK_SRC_PATTERN], 1,
                   emit_patterns, &pattern_state);
         walk_init(&walks[BINK_SRC_X_OFF], motion_x.data, x_rows, x_chunks, x_n,
-                  lens[BINK_SRC_X_OFF], emit_motion, &x_state);
+                  lens[BINK_SRC_X_OFF], 1, emit_motion, &x_state);
         walk_init(&walks[BINK_SRC_Y_OFF], motion_y.data, y_rows, y_chunks, y_n,
-                  lens[BINK_SRC_Y_OFF], emit_motion, &y_state);
-        walk_init(&walks[BINK_SRC_INTRA_DC], NULL, zeros, NULL, 0,
-                  lens[BINK_SRC_INTRA_DC], emit_types, &unused);
-        walk_init(&walks[BINK_SRC_INTER_DC], NULL, zeros, NULL, 0,
-                  lens[BINK_SRC_INTER_DC], emit_types, &unused);
+                  lens[BINK_SRC_Y_OFF], 1, emit_motion, &y_state);
+        walk_init(&walks[BINK_SRC_INTRA_DC], (const uint8_t *)intra_dc,
+                  intra_rows, intra_chunks, intra_n, lens[BINK_SRC_INTRA_DC], 2,
+                  emit_intra_dcs, &unused);
+        walk_init(&walks[BINK_SRC_INTER_DC], (const uint8_t *)inter_dc,
+                  inter_rows, inter_chunks, inter_n, lens[BINK_SRC_INTER_DC], 2,
+                  emit_inter_dcs, &unused);
         walk_init(&walks[BINK_SRC_RUN], NULL, zeros, NULL, 0, lens[BINK_SRC_RUN],
-                  emit_types, &unused);
+                  1, emit_types, &unused);
 
         if (emit_rows(NULL, walks, BINK_NB_SRC, blocks_y) != 0) {
             free(zeros);
@@ -855,7 +1129,8 @@ static int encode_plane(BinkBitWriter *bw, const uint8_t *src, int src_stride,
             }
         }
 
-        if (emit_rows(bw, walks, BINK_NB_SRC, blocks_y) != 0) {
+        if (emit_rows_dct(bw, walks, BINK_NB_SRC, blocks_y, blocks,
+                          blocks_x) != 0) {
             free(zeros);
             failed = 1;
             goto done;
@@ -887,11 +1162,17 @@ done:
     free(x_rows);
     free(y_rows);
     free(type_rows);
+    free(intra_rows);
+    free(inter_rows);
+    free(intra_dc);
+    free(inter_dc);
     free(type_chunks);
     free(color_chunks);
     free(pattern_chunks);
     free(x_chunks);
     free(y_chunks);
+    free(intra_chunks);
+    free(inter_chunks);
     buf_free(&colors);
     buf_free(&patterns);
     buf_free(&motion_x);

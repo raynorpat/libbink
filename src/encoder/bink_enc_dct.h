@@ -22,6 +22,9 @@ const int32_t *bink_enc_inter_quant(int index);
  * return never hides a partial result. */
 void bink_enc_fdct(const uint8_t pixels[64], double coef[64]);
 
+/* Same transform over a signed block, for motion-compensated residuals. */
+void bink_enc_fdct_signed(const int16_t pixels[64], double coef[64]);
+
 /* Quantize raster-ordered coef into scan-ordered t. Returns -1 when a value
  * does not fit the coefficient tree's 15 planes. t is undefined when the
  * function returns -1. */

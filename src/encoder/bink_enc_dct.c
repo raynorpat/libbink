@@ -152,7 +152,7 @@ static int dct_init(void)
     return 0;
 }
 
-void bink_enc_fdct(const uint8_t pixels[64], double coef[64])
+static void fdct_block(const int16_t pixels[64], double coef[64])
 {
     double m[8][8];
     double tmp[8][8];
@@ -188,6 +188,21 @@ void bink_enc_fdct(const uint8_t pixels[64], double coef[64])
             coef[row * 8 + col] = sum;
         }
     }
+}
+
+void bink_enc_fdct(const uint8_t pixels[64], double coef[64])
+{
+    int16_t block[64];
+    int i;
+
+    for (i = 0; i < 64; i++)
+        block[i] = (int16_t)pixels[i];
+    fdct_block(block, coef);
+}
+
+void bink_enc_fdct_signed(const int16_t pixels[64], double coef[64])
+{
+    fdct_block(pixels, coef);
 }
 
 /* ------------------------------------------------------------------ */
