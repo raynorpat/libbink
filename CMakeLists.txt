@@ -159,6 +159,28 @@ if(BINK_BUILD_TOOLS)
       ${BINK_LINK_TARGET} ${BINK_SDL_TARGET})
     target_link_libraries(bink_sdlgl_player PRIVATE
       ${BINK_LINK_TARGET} ${BINK_SDL_TARGET})
+    find_package(Vulkan QUIET)
+    find_path(SHADERC_INCLUDE shaderc/shaderc.h)
+    find_library(SHADERC_LIBRARY NAMES shaderc_shared shaderc_combined shaderc)
+    if(Vulkan_FOUND AND SHADERC_INCLUDE AND SHADERC_LIBRARY)
+      add_executable(bink_sdlvulkan_player src/tools/bink_sdlvulkan_player.c
+                     src/tools/bink_vulkan_renderer.c
+                     src/tools/bink_sdl_player_core.c
+                     src/tools/bink_mix.c src/tools/bink_playback.c
+                     src/tools/bink_playback_sdl.c)
+      bink_set_compile_settings(bink_sdlvulkan_player)
+      if(BINK_USE_SDL3)
+        target_compile_definitions(bink_sdlvulkan_player PRIVATE BINK_USE_SDL3=1)
+      endif()
+      target_include_directories(bink_sdlvulkan_player PRIVATE ${SHADERC_INCLUDE})
+      target_link_libraries(bink_sdlvulkan_player PRIVATE
+        ${BINK_LINK_TARGET} ${BINK_SDL_TARGET} Vulkan::Vulkan ${SHADERC_LIBRARY}
+        c++)
+      message(STATUS "bink_sdlvulkan_player: Vulkan and shaderc found")
+    else()
+      message(STATUS "Vulkan or shaderc not found; skipping bink_sdlvulkan_player")
+    endif()
+
     if(APPLE)
       enable_language(OBJC)
       add_executable(bink_sdlmetal_player src/tools/bink_sdlmetal_player.c

@@ -88,7 +88,11 @@ Full documentation is in `docs/usage.md`.
   Enables every audio track and mixes them. Esc/Q quits, Space pauses the
   picture and the sound, Left/Right seek one second.
 - `bink_sdlmetal_player video.bik` - the same controls through Metal on
-  macOS. Both SDL players share one loop; only the renderer differs.
+  macOS, and `bink_sdlvulkan_player` through Vulkan. All three SDL
+  players share one loop; only the renderer differs. Vulkan builds when
+  the Vulkan headers, loader and shaderc are found; on macOS it runs
+  through MoltenVK (`brew install vulkan-loader molten-vk shaderc`), and
+  `BINK_VULKAN_LIBRARY` points at the loader when SDL cannot find it.
 - `bink_sdlgl_player video.bik` - the same controls on an OpenGL 3.2 window.
   The YUV to RGB conversion runs in a GLSL shader, and `M` switches to a
   second shader that interpolates between decoded frames using the
