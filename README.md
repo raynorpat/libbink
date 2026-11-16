@@ -80,7 +80,9 @@ bink_first(b);
 bink_close(b);
 ```
 
-Full documentation is in `docs/usage.md`.
+Full documentation is in `docs/usage.md`. `docs/README.md` indexes the
+rest: the tools and players, the source layout, and the development
+workflow.
 
 ## Tools
 

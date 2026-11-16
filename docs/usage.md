@@ -221,6 +221,9 @@ const unsigned char *bink_get_plane(const bink object, int plane);
 int bink_get_stride(const bink object, int plane);
 const unsigned char *bink_get_audio(const bink object, unsigned char track);
 unsigned long bink_get_audio_size(const bink object, unsigned char track);
+int bink_get_motion(const bink object, unsigned long *blocks_w,
+                    unsigned long *blocks_h, const signed char **mv_x,
+                    const signed char **mv_y);
 ```
 
 `bink_get_plane` returns a decoded plane or `NULL` if video is disabled,
@@ -269,12 +272,27 @@ silence, and it does not reset overlap. A payload the decoder cannot
 finish (the bit reader runs out, or a checked limit fails) does the same
 for that track. The other tracks are still decoded.
 
+`bink_get_motion` returns the motion vectors of the current frame's luma
+plane, one per 8x8 block, in pixels. The vector for block column `bx`,
+row `by` is `mv_x[by * blocks_w + bx]`, `mv_y[by * blocks_w + bx]`. It
+points from the block to the pixels it was copied from in the previous
+frame. Blocks that are not motion-compensated have `(0, 0)`. Any
+out-parameter may be `NULL`.
+
+The function returns `1` when vectors are available and `0` otherwise:
+for a `NULL` handle, when video is disabled, and for a frame decoded with
+no previous frame (the first frame, and the frame a seek lands on). The
+arrays belong to the handle and are valid until the next decode. The GPU
+players use them for frame interpolation; see `docs/tools.md`.
+
 ## Error handling
 
 - Open functions return `NULL`; no error code is available beyond a message
   on `stderr` for unsupported or malformed files.
 - `bink_info_*` return `-1` only for a `NULL` handle.
 - `bink_first`/`bink_next` return `BINK_ERROR` for decode failures.
+  After a failed video decode the planes and the RGB buffer still hold
+  the last frame that decoded.
 - `bink_seek_keyframe` returns `-1` for a `NULL` handle or a failed decode.
 - Corrupt bitstreams are rejected with an error rather than reading out of
   bounds. Out-of-range motion references leave the destination block
@@ -297,7 +315,7 @@ handles may be used concurrently.
 `bink_build` encodes a directory of `.ppm`, `.bmp`, `.png`, `.jpg`, and
 `.jpeg` frames, or a single image, into a `BIKi` file. `--audio` attaches
 one PCM WAV. `--verify` decodes the file and compares the visible YUV
-planes. Exit codes are
+planes and the decoded audio samples. Exit codes are
 `0` success, `1` usage, `2` bad input, `3` encode failure, `4` verify
 failure. An encode failure deletes the partial output; a verify failure
 leaves the file. Details are in `docs/encoder.md`.

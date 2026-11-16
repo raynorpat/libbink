@@ -4,7 +4,9 @@
 
 - CMake 3.16 or newer
 - A C99 compiler (tested with Apple Clang on macOS)
-- Optional: SDL3 or SDL2 development packages for `bink_sdl_player`
+- Optional: SDL3 or SDL2 development packages for the SDL players
+- Optional: the Vulkan headers and loader plus shaderc for
+  `bink_sdlvulkan_player`
 
 The library itself has no external dependencies beyond the C standard
 library.
@@ -16,7 +18,7 @@ library.
 | `BINK_BUILD_STATIC` | `ON` | Build `bink_static` |
 | `BINK_BUILD_SHARED` | `ON` | Build `bink_shared` (versioned SONAME on Unix) |
 | `BINK_BUILD_ENCODER` | `ON` | Build the static encoder `bink_encoder` (`libbinkenc`) |
-| `BINK_BUILD_TOOLS` | `OFF` | Build `bink_dump`, `bink_build`, and `bink_sdl_player`. Turns the encoder on. |
+| `BINK_BUILD_TOOLS` | `OFF` | Build `bink_dump`, `bink_build`, and the players the host supports. Turns the encoder on. |
 | `BINK_BUILD_TESTS` | `ON` | Build and register the CTest suite |
 | `BINK_SDL_VERSION` | `AUTO` | `AUTO`, `2`, or `3` |
 
@@ -40,8 +42,12 @@ cmake --build build
 ```
 
 With `AUTO`, CMake looks for SDL3 first and then SDL2. If neither is found,
-`bink_sdl_player` is skipped with a warning. `bink_dump` and `bink_build` are
-still built. `bink_build` encodes PPM, BMP, PNG, or JPEG frames into a
+the SDL players are skipped with a warning. `bink_dump` and `bink_build` are
+still built. With SDL present, `bink_sdl_player` and `bink_sdlgl_player`
+are built everywhere, `bink_sdlmetal_player` on macOS, and
+`bink_sdlvulkan_player` when Vulkan and shaderc are found. On Windows the
+build also produces `bink_d3d9_player` and `bink_d3d11_player`, which do
+not need SDL. `docs/tools.md` lists what each one needs. `bink_build` encodes PPM, BMP, PNG, or JPEG frames into a
 `BIKi` file; see `docs/encoder.md`.
 Force a backend explicitly:
 
@@ -69,7 +75,8 @@ cmake --install build
 ```
 
 This installs the libraries, the public headers `bink.h` and (when the
-encoder is built) `bink_encoder.h`, and the tools that were built. The
+encoder is built) `bink_encoder.h`, and, with tools enabled, `bink_dump`,
+`bink_build`, and `bink_sdl_player`. The other players are not installed. The
 encoder archive is `libbinkenc.a`. The CMake alias is `Bink::encoder`.
 
 ## Tests and sample media
@@ -108,3 +115,6 @@ cmake -S . -B build-asan -DBINK_BUILD_TESTS=ON \
 cmake --build build-asan
 BINK_TEST_MEDIA="$HOME/Downloads" ctest --test-dir build-asan -R decode --output-on-failure
 ```
+
+The Windows cross build and the rest of the development workflow are in
+`docs/development.md`.

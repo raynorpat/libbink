@@ -93,7 +93,7 @@ that was compressed into that file.
 | `--fps N[/D]` | Frame rate, default `15` |
 | `--keyframe-interval N` | Default `150`. `0` marks only frame 0 |
 | `--motion-range N` | Search radius `0..15`, default `8`. `0` disables motion |
-| `--verify` | Decode and check visible YUV planes within tolerance, plus audio byte counts |
+| `--verify` | Decode and check visible YUV planes within tolerance, plus audio byte counts and decoded samples (RMS error within 25% of the source level) |
 | `--verbose`, `--quiet` | Progress on stderr |
 | `-h`, `--help`, `--version` | Usage and `bink_build 0.1.0` |
 
