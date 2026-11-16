@@ -643,87 +643,125 @@ static int write_float(BinkBitWriter *bw, float value)
     return bink_bw_put(bw, (unsigned)sign, 1);
 }
 
-/* Response of dct_iii at the middle sample when src[0] is 1. */
-static int dc_response(int n, float *gain)
+float *bink_audio_dct_table(int frame_len)
 {
-    static float cached[13];
-    static unsigned char ready[13];
-    int bits = 0;
-    int value = n;
-    float *src;
-    float *dst;
-    double *re;
-    double *im;
+    float *tab;
+    int k;
+    int t;
 
-    while (value > 1) {
-        value >>= 1;
-        bits++;
-    }
-    if (n < 2 || n != (1 << bits) || bits >= 13)
-        return -1;
-    if (!ready[bits]) {
-        src = (float *)calloc((size_t)n, sizeof(float));
-        dst = (float *)calloc((size_t)n, sizeof(float));
-        re = (double *)calloc((size_t)n, sizeof(double));
-        im = (double *)calloc((size_t)n, sizeof(double));
-        if (src == NULL || dst == NULL || re == NULL || im == NULL) {
-            free(src);
-            free(dst);
-            free(re);
-            free(im);
-            return -1;
+    if (frame_len <= 0 || frame_len > BINK_AUDIO_MAX_FRAME)
+        return NULL;
+    tab = (float *)malloc((size_t)frame_len * (size_t)frame_len *
+                          sizeof(*tab));
+    if (tab == NULL)
+        return NULL;
+    for (k = 0; k < frame_len; k++) {
+        for (t = 0; t < frame_len; t++) {
+            tab[(size_t)k * (size_t)frame_len + (size_t)t] =
+                (float)cos(M_PI / (double)frame_len *
+                           ((double)t + 0.5) * (double)k);
         }
-        src[0] = 1.0f;
-        dct_iii(dst, src, n, re, im);
-        cached[bits] = dst[n / 2];
-        ready[bits] = 1;
-        free(src);
-        free(dst);
-        free(re);
-        free(im);
     }
-    if (cached[bits] == 0.0f)
-        return -1;
-    *gain = cached[bits];
-    return 0;
+    return tab;
 }
 
-int bink_audio_write_dc_block(BinkBitWriter *bw, const BinkAudioInfo *info,
-                              const float *channel_mean)
+int bink_audio_write_dct_block(BinkBitWriter *bw, const BinkAudioInfo *info,
+                               const float *const out[2], const float *tab)
 {
+    double *coef;
     int ch;
-    int i;
-    float gain = 1.0f;
 
-    if (bw == NULL || info == NULL || channel_mean == NULL)
+    if (bw == NULL || info == NULL || out == NULL || tab == NULL)
         return -1;
-    if (info->use_dct) {
-        if (dc_response(info->frame_len, &gain) != 0)
-            return -1;
-        if (bink_bw_put(bw, 0, 2) != 0)
-            return -1;
-    }
-    for (ch = 0; ch < info->channels; ch++) {
-        float coded = 0.0f;
+    if (!info->use_dct || info->frame_len <= 0 ||
+        info->frame_len > BINK_AUDIO_MAX_FRAME || info->channels < 1 ||
+        info->channels > 2 || out[0] == NULL)
+        return -1;
+    coef = (double *)malloc((size_t)info->frame_len * sizeof(*coef));
+    if (coef == NULL)
+        return -1;
+    if (bink_bw_put(bw, 0, 2) != 0)
+        goto fail;
 
-        if (info->use_dct)
-            coded = channel_mean[ch] / (gain * info->root * 2.0f);
-        if (write_float(bw, coded) != 0)
-            return -1;
-        if (write_float(bw, 0.0f) != 0)
-            return -1;
+    for (ch = 0; ch < info->channels; ch++) {
+        const float *src = out[ch];
+        double maxabs = 0.0;
+        int q = 0;
+        int i;
+
+        if (src == NULL)
+            goto fail;
+        for (i = 0; i < info->frame_len; i++) {
+            const float *row = tab + (size_t)i * (size_t)info->frame_len;
+            double sum = 0.0;
+            int t;
+
+            for (t = 0; t < info->frame_len; t++)
+                sum += (double)row[t] * (double)src[t];
+            /* E[0] = C[0] / 2: the DC basis has norm N, every other one
+             * N / 2. */
+            coef[i] = i == 0 ? sum * 0.5 : sum;
+        }
+        if (write_float(bw, (float)(coef[0] / (double)info->root)) != 0 ||
+            write_float(bw, (float)(coef[1] / (double)info->root)) != 0)
+            goto fail;
+        for (i = 2; i < info->frame_len; i++) {
+            double mag = fabs(coef[i]);
+
+            if (mag > maxabs)
+                maxabs = mag;
+        }
+        /* One quantizer for the frame in this version; adaptive per band
+         * arrives next. */
+        while (q < 95 && maxabs / (double)info->quant[q] > 1023.0)
+            q++;
         for (i = 0; i < info->num_bands; i++) {
-            if (bink_bw_put(bw, 0, 8) != 0)
-                return -1;
+            if (bink_bw_put(bw, (unsigned)q, 8) != 0)
+                goto fail;
         }
         i = 2;
         while (i < info->frame_len) {
-            if (bink_bw_put(bw, 0, 1) != 0)
-                return -1;
-            if (bink_bw_put(bw, 0, 4) != 0)
-                return -1;
-            i += 8;
+            int j = i + 8;
+            int width = 0;
+            int k;
+
+            if (j > info->frame_len)
+                j = info->frame_len;
+            for (k = i; k < j; k++) {
+                long m = lround(coef[k] / (double)info->quant[q]);
+                unsigned long mag = m < 0 ? (unsigned long)(-m)
+                                          : (unsigned long)m;
+                int bits = 0;
+
+                while (mag != 0) {
+                    bits++;
+                    mag >>= 1;
+                }
+                if (bits > width)
+                    width = bits;
+            }
+            if (width > 15)
+                goto fail;
+            /* No zero-run coding yet: an all-zero chunk is width 0. */
+            if (bink_bw_put(bw, 0, 1) != 0 ||
+                bink_bw_put(bw, (unsigned)width, 4) != 0)
+                goto fail;
+            for (k = i; k < j && width != 0; k++) {
+                long m = lround(coef[k] / (double)info->quant[q]);
+                unsigned long mag = m < 0 ? (unsigned long)(-m)
+                                          : (unsigned long)m;
+
+                if (bink_bw_put(bw, mag, width) != 0)
+                    goto fail;
+                if (mag != 0 && bink_bw_put(bw, m < 0, 1) != 0)
+                    goto fail;
+            }
+            i = j;
         }
     }
+    free(coef);
     return 0;
+fail:
+    free(coef);
+    return -1;
 }

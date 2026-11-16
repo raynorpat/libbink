@@ -16,6 +16,9 @@ struct BinkEncAudio {
     size_t source_pos;
     size_t sample_count;
     int block_out;
+    float *out;
+    float *tab;
+    int16_t *look;
 };
 
 int bink_enc_audio_open(BinkEncAudio **out, const bink_enc_audio_info *info,
@@ -53,6 +56,20 @@ int bink_enc_audio_open(BinkEncAudio **out, const bink_enc_audio_info *info,
         free(audio);
         return -1;
     }
+    audio->out = (float *)calloc(
+        (size_t)audio->info.channels * (size_t)audio->info.frame_len,
+        sizeof(float));
+    audio->look = (int16_t *)calloc(
+        (size_t)audio->info.channels * (size_t)audio->info.overlap_len,
+        sizeof(int16_t));
+    audio->tab = bink_audio_dct_table(audio->info.frame_len);
+    if (audio->out == NULL || audio->look == NULL || audio->tab == NULL) {
+        free(audio->out);
+        free(audio->look);
+        free(audio->tab);
+        free(audio);
+        return -1;
+    }
 
     for (i = 0; i < frames; i++) {
         acc += (uint64_t)info->rate * fps_den;
@@ -78,6 +95,11 @@ int bink_enc_audio_open(BinkEncAudio **out, const bink_enc_audio_info *info,
 
 void bink_enc_audio_close(BinkEncAudio *audio)
 {
+    if (audio == NULL)
+        return;
+    free(audio->out);
+    free(audio->look);
+    free(audio->tab);
     free(audio);
 }
 
@@ -159,9 +181,10 @@ int bink_enc_audio_frame(BinkEncAudio *audio, const bink_enc_source *source,
     }
 
     for (block = 0; block < blocks; block++) {
-        float mean[2];
+        const float *out_ptrs[2];
         int ch;
         size_t want = (size_t)audio->block_out;
+        size_t ahead;
         int i;
 
         memset(samples, 0,
@@ -177,14 +200,40 @@ int bink_enc_audio_frame(BinkEncAudio *audio, const bink_enc_source *source,
             source->read_audio(source->user, track, audio->source_pos, want,
                                samples);
         }
+        /* One block of lookahead: the tail of this block must equal the head
+         * of the next one so the decoder's crossfade is exact. */
+        memset(audio->out, 0,
+               (size_t)audio->info.channels * (size_t)audio->info.frame_len *
+                   sizeof(float));
+        memset(audio->look, 0,
+               (size_t)audio->info.channels * (size_t)audio->info.overlap_len *
+                   sizeof(int16_t));
+        ahead = audio->source_pos + (size_t)audio->block_out;
+        if (ahead < audio->sample_count && source != NULL &&
+            source->read_audio != NULL) {
+            size_t count = audio->sample_count - ahead;
+
+            if (count > (size_t)audio->info.overlap_len)
+                count = (size_t)audio->info.overlap_len;
+            source->read_audio(source->user, track, ahead, count, audio->look);
+        }
         for (ch = 0; ch < audio->info.channels; ch++) {
-            double sum = 0.0;
+            float *dst = audio->out + (size_t)ch * (size_t)audio->info.frame_len;
 
             for (i = 0; i < audio->block_out; i++)
-                sum += samples[i * audio->info.channels + ch];
-            mean[ch] = (float)(sum / audio->block_out / 32768.0);
+                dst[i] = (float)samples[i * audio->info.channels + ch] /
+                         32768.0f;
+            for (i = 0; i < audio->info.overlap_len; i++)
+                dst[audio->block_out + i] =
+                    (float)audio->look[i * audio->info.channels + ch] /
+                    32768.0f;
         }
-        if (bink_audio_write_dc_block(&writer, &audio->info, mean) != 0 ||
+        out_ptrs[0] = audio->out;
+        out_ptrs[1] = audio->info.channels == 2
+                          ? audio->out + audio->info.frame_len
+                          : NULL;
+        if (bink_audio_write_dct_block(&writer, &audio->info, out_ptrs,
+                                       audio->tab) != 0 ||
             bink_bw_align32(&writer) != 0) {
             free(samples);
             bink_bw_free(&writer);

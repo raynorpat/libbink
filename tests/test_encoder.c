@@ -1041,6 +1041,171 @@ static int check_audio_samples(const char *path, unsigned frames,
     return 0;
 }
 
+/* Decode every frame's audio into one contiguous buffer. */
+static int collect_audio(const char *path, int16_t **samples, size_t *count,
+                         int *channels)
+{
+    bink movie = bink_open_file(path, BINK_MODE_DISK);
+    unsigned long frames = 0;
+    unsigned char mask = 0;
+    unsigned char chans[7];
+    unsigned char depth[7];
+    unsigned long rates[7];
+    int16_t *buf = NULL;
+    size_t len = 0;
+    size_t cap = 0;
+    char status;
+    unsigned long f;
+    int rc = 1;
+
+    if (movie == NULL) {
+        fprintf(stderr, "FAIL audio: cannot open %s\n", path);
+        return 1;
+    }
+    if (bink_info_all(movie, NULL, &frames, NULL) != 0 ||
+        bink_info_audio(movie, &mask, chans, depth, rates) != 0 ||
+        (mask & 1) == 0 || bink_enable_video(movie, 1) != 0 ||
+        bink_enable_audio(movie, 0, 1) != 0) {
+        fprintf(stderr, "FAIL audio: cannot query %s\n", path);
+        goto done;
+    }
+    status = bink_first(movie);
+    for (f = 0; f < frames; f++) {
+        const unsigned char *pcm;
+        unsigned long size;
+
+        if (status != BINK_MORE && status != BINK_LAST) {
+            fprintf(stderr, "FAIL audio: stopped at frame %lu\n", f);
+            goto done;
+        }
+        pcm = bink_get_audio(movie, 0);
+        size = bink_get_audio_size(movie, 0);
+        if (pcm == NULL || size == 0) {
+            fprintf(stderr, "FAIL audio: no samples at frame %lu\n", f);
+            goto done;
+        }
+        if (len + size / 2 > cap) {
+            size_t want = (len + size / 2) * 2 + 4096;
+            int16_t *grown = (int16_t *)realloc(buf, want * sizeof(*buf));
+
+            if (grown == NULL) {
+                fprintf(stderr, "FAIL audio: out of memory\n");
+                goto done;
+            }
+            buf = grown;
+            cap = want;
+        }
+        memcpy(buf + len, pcm, size);
+        len += size / 2;
+        if (f + 1 < frames)
+            status = bink_next(movie);
+    }
+    *samples = buf;
+    *count = len;
+    *channels = chans[0];
+    buf = NULL;
+    rc = 0;
+done:
+    free(buf);
+    bink_close(movie);
+    return rc;
+}
+
+static int test_audio_sine_frequency(void)
+{
+    enum { RATE = 44100, FREQ = 440, AMPLITUDE = 12000, VIDEO_FRAMES = 15 };
+    enum { W = 8, H = 8 };
+    uint8_t *frames;
+    int16_t *pcm;
+    mem_source mem;
+    bink_enc_options opt;
+    char path[1024];
+    char err[256];
+    bink_enc_status status;
+    int16_t *decoded = NULL;
+    size_t decoded_count = 0;
+    int channels = 0;
+    unsigned i;
+    size_t n;
+    double crossings = 0.0;
+    double expected;
+    double sum = 0.0;
+    int rc = 1;
+
+    frames = (uint8_t *)calloc(VIDEO_FRAMES, (size_t)W * H * 3);
+    pcm = (int16_t *)malloc((size_t)RATE * sizeof(*pcm));
+    if (frames == NULL || pcm == NULL) {
+        fprintf(stderr, "FAIL audio sine: out of memory\n");
+        goto done;
+    }
+    for (i = 0; i < VIDEO_FRAMES; i++)
+        fill_rgb(frames + (size_t)i * W * H * 3, W, H, 10, 20, 30);
+    for (i = 0; i < RATE; i++)
+        pcm[i] = (int16_t)lrint(AMPLITUDE * sin(2.0 * M_PI * FREQ * (double)i /
+                                               (double)RATE));
+
+    memset(&mem, 0, sizeof(mem));
+    mem.frames = frames;
+    mem.width = W;
+    mem.height = H;
+    mem.count = VIDEO_FRAMES;
+    mem.channels = 1;
+    mem.pcm = pcm;
+    mem.sample_count = RATE;
+    mem.fail_index = -1;
+    bink_enc_options_default(&opt);
+    opt.verify = 1;
+    opt.motion_range = 0;
+    path_for(path, sizeof(path), "sine.bik");
+    err[0] = '\0';
+    status = encode_mem(&mem, &opt, path, RATE, err, sizeof(err));
+    if (expect_ok(status, err, "audio sine") != 0)
+        goto done;
+    if (collect_audio(path, &decoded, &decoded_count, &channels) != 0)
+        goto done;
+    if (channels != 1 || decoded_count < (size_t)RATE / 2) {
+        fprintf(stderr, "FAIL audio sine: decoded %zu samples, %d channels\n",
+                decoded_count, channels);
+        goto done;
+    }
+    for (n = 0; n < decoded_count; n++) {
+        sum += (double)decoded[n] * (double)decoded[n];
+        if (n > 0 && ((decoded[n - 1] < 0) != (decoded[n] < 0)))
+            crossings += 1.0;
+    }
+    if (sqrt(sum / (double)decoded_count) < 1000.0) {
+        fprintf(stderr, "FAIL audio sine: RMS too low\n");
+        goto done;
+    }
+    expected = 2.0 * (double)FREQ * (double)decoded_count / (double)RATE;
+    if (fabs(crossings - expected) > expected * 0.01) {
+        fprintf(stderr, "FAIL audio sine: %.1f crossings, expected %.1f\n",
+                crossings, expected);
+        goto done;
+    }
+    /* Past the source, only the last block's overlap tail remains. It must be
+     * silence plus ringing, never a reused copy of earlier samples. */
+    if (decoded_count > (size_t)RATE) {
+        for (n = (size_t)RATE; n < decoded_count; n++) {
+            int magnitude = decoded[n] < 0 ? -decoded[n] : decoded[n];
+
+            if (magnitude > 1500) {
+                fprintf(stderr,
+                        "FAIL audio sine: tail sample %zu is %d after the source\n",
+                        n - (size_t)RATE, decoded[n]);
+                goto done;
+            }
+        }
+    }
+    rc = 0;
+done:
+    remove(path);
+    free(frames);
+    free(pcm);
+    free(decoded);
+    return rc;
+}
+
 static int test_audio(void)
 {
     enum { W = 8, H = 8 };
@@ -1672,6 +1837,8 @@ int main(void)
     if (test_quantize_rejects_out_of_range() != 0)
         return 1;
     if (test_audio() != 0)
+        return 1;
+    if (test_audio_sine_frequency() != 0)
         return 1;
     if (test_failure_keeps_or_removes() != 0)
         return 1;

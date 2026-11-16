@@ -36,11 +36,19 @@ int bink_audio_describe(unsigned long rate, int channels, int use_dct,
 int bink_audio_create(BinkAudio **out, unsigned long rate, int channels,
                       int use_dct, unsigned long max_bytes);
 /**
- * Write one DCT or RDFT block whose transform DC is channel_mean[ch]
- * (samples in the -1..1 range the decoder turns into s16).
+ * Cosine table for the forward DCT-II of one DCT block:
+ * tab[k * frame_len + t] = cos(pi / frame_len * (t + 0.5) * k).
+ * Returns frame_len * frame_len floats, or NULL. Free with free().
  */
-int bink_audio_write_dc_block(BinkBitWriter *bw, const BinkAudioInfo *info,
-                              const float *channel_mean);
+float *bink_audio_dct_table(int frame_len);
+/**
+ * Write one DCT block: the 2-bit marker, then per channel the two float
+ * coded coefficients, the band quantizer indices, and the coefficient
+ * chunks. out[ch] holds frame_len samples (block plus overlap tail) in the
+ * -1..1 range, the same time-domain block the decoder reconstructs.
+ */
+int bink_audio_write_dct_block(BinkBitWriter *bw, const BinkAudioInfo *info,
+                               const float *const out[2], const float *tab);
 void bink_audio_reset(BinkAudio *audio);
 void bink_audio_destroy(BinkAudio *audio);
 int bink_audio_decode(BinkAudio *audio, const unsigned char *data,
