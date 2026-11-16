@@ -1,7 +1,7 @@
 # Encoder RESIDUE blocks — design
 
-Status: awaiting approval. Follow-on to
-`2026-11-15-encoder-dct-design.md`.
+Status: writer shipped, selection not enabled. See "Outcome" at the end.
+Follow-on to `2026-11-15-encoder-dct-design.md`.
 
 ## Intent
 
@@ -148,3 +148,34 @@ Exact function bodies, the test thresholds (calibrated by measurement and
 recorded in the plan), and the docs sentence. The bitstream contract
 above is not open for reinterpretation — the decoder is the authority,
 and a mismatch shows up as a wrong picture, not a decode error.
+
+## Outcome
+
+The writer and the decoder hook shipped (`78ff8ef`):
+`bink_enc_emit_residue` and `bink_video_read_residue`, with a round-trip
+test that covers ±255, all-zero blocks, sparse random blocks and the
+126-vs-128 significant-bit boundary. The bitstream matches the decoder's
+parser exactly.
+
+The selection step in Task 2 was built, instrumented and then dropped,
+because the approach's premise did not hold. Against our own DCT, the
+residue candidate never wins. Fifteen combinations of changed pixels
+(1–32 per block) and step sizes (20, 60, 200) all favoured DCT; for
+example two pixels at +200 cost 335 bits as a residue and 273 as a DCT
+residual, and eight pixels at +200 cost 419 against 323.
+
+The cause is structural. Our selector tries eight quantizers per block
+and keeps the cheapest one that stays inside the error caps. RAD's
+encoder, which is where the RESIDUE block pays for itself, quantizes
+every block at level 0 with no search, so its DCT is a fixed-cost
+baseline that an exact residue often beats. Ours is not.
+
+Tightening the caps makes residue competitive (at max 8 / RMSE 1.5 it
+wins on sparse large residuals, 257 bits against 354), but the same
+photographic clip grows from 38,616 to 231,120 bytes at those caps, so
+that trade is not worth taking.
+
+Keeping the writer means the block type is implemented and verified
+against the real parser. Wiring it into selection is a small change
+whenever the DCT search gains a fixed-quant or speed mode, which is the
+condition under which residue earns its place.
