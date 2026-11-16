@@ -4,6 +4,7 @@
 #include "bink_bits.h"
 
 #include <stddef.h>
+#include <stdint.h>
 
 enum {
     SKIP_BLOCK = 0,
@@ -94,6 +95,20 @@ int bink_bundle_read_dcs(BinkBits *bits, BinkBundle *b,
 
 /** Bundle count widths for one plane. width is the plane width in pixels. */
 void bink_bundle_init_lengths(int lens[BINK_NB_SRC], int width, int bw);
+
+/* DCT tables the encoder needs. index must be 0..15; NULL otherwise. */
+const uint8_t *bink_video_scan(void);
+const int32_t *bink_video_intra_quant(int index);
+const int32_t *bink_video_inter_quant(int index);
+
+/**
+ * Read one coefficient tree into scan-ordered values. Reads the 4-bit cbits,
+ * the tree bits, and the 4-bit quantizer. Returns the quantizer index or -1.
+ * t[0] is always 0 because the DC value comes from the DC bundle.
+ * This is the decoder's parser exposed so the encoder can be checked against
+ * it directly.
+ */
+int bink_video_read_coeffs(BinkBits *bits, int16_t t[64]);
 
 /**
  * Plane geometry shared by the decoder and the encoder.

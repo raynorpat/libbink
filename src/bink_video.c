@@ -792,6 +792,38 @@ static void unquantize_dct_coeffs(int32_t block[64], const int32_t quant[64],
     }
 }
 
+const uint8_t *bink_video_scan(void)
+{
+    return bink_scan;
+}
+
+const int32_t *bink_video_intra_quant(int index)
+{
+    return (index < 0 || index > 15) ? NULL : bink_intra_quant[index];
+}
+
+const int32_t *bink_video_inter_quant(int index)
+{
+    return (index < 0 || index > 15) ? NULL : bink_inter_quant[index];
+}
+
+int bink_video_read_coeffs(BinkBits *bits, int16_t t[64])
+{
+    int32_t block[64];
+    int coef_count;
+    int coef_idx[64];
+    int i;
+    int q;
+
+    memset(block, 0, sizeof(block));
+    q = read_dct_coeffs(bits, block, bink_scan, &coef_count, coef_idx, -1);
+    if (q < 0)
+        return -1;
+    for (i = 0; i < 64; i++)
+        t[i] = (int16_t)block[bink_scan[i]];
+    return q;
+}
+
 static int read_residue(BinkBits *bits, int16_t block[64], int masks_count)
 {
     int coef_list[128];

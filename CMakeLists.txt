@@ -76,6 +76,7 @@ if(BINK_BUILD_ENCODER)
     src/encoder/bink_encoder.c
     src/encoder/bink_enc_video.c
     src/encoder/bink_enc_audio.c
+    src/encoder/bink_enc_dct.c
     src/encoder/bink_enc_image.c
     src/encoder/bink_enc_wav.c
     src/encoder/bink_enc_verify.c

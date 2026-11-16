@@ -1,9 +1,12 @@
 #include "bink.h"
+#include "bink_dsp.h"
+#include "bink_enc_dct.h"
 #include "bink_enc_image.h"
 #include "bink_enc_video.h"
 #include "bink_enc_wav.h"
 #include "bink_encoder.h"
 #include "bink_enc_paths.h"
+#include "bink_video.h"
 #include "test_common.h"
 
 #include <errno.h>
@@ -327,6 +330,136 @@ static int test_skip_and_motion(void)
         return 1;
     remove(path);
     return 0;
+}
+
+static int test_dct_roundtrip(void)
+{
+    /* gradient, hard edge, flat, and pseudo-random blocks */
+    const int kinds = 4;
+    int kind;
+    int failures = 0;
+
+    for (kind = 0; kind < kinds; kind++) {
+        uint8_t pixels[64];
+        double coef[64];
+        int16_t t[64];
+        int32_t recon[64];
+        uint8_t out[64];
+        const int32_t *quant = bink_enc_intra_quant(0);
+        int i;
+        int maxerr = 0;
+
+        for (i = 0; i < 64; i++) {
+            int x = i & 7;
+            int y = i >> 3;
+
+            if (kind == 0)
+                pixels[i] = (uint8_t)(20 + x * 25 + y * 2);
+            else if (kind == 1)
+                pixels[i] = x < 4 ? 230 : 20;
+            else if (kind == 2)
+                pixels[i] = 123;
+            else
+                pixels[i] = (uint8_t)((i * 37 + 11) & 255);
+        }
+        bink_enc_fdct(pixels, coef);
+        if (bink_enc_quantize(coef, quant, t) != 0)
+            return 1;
+        bink_enc_unquantize(t, quant, recon);
+        bink_idct_put(out, 8, recon);
+        for (i = 0; i < 64; i++) {
+            int e = out[i] - (int)pixels[i];
+            if (e < 0)
+                e = -e;
+            if (e > maxerr)
+                maxerr = e;
+        }
+        if (maxerr > 2)
+            failures++;
+    }
+    return failures;
+}
+
+static int test_coeff_writer_roundtrip(void)
+{
+    BinkBitWriter bw;
+    int16_t t[64];
+    int16_t back[64];
+    int seed = 12345;
+    int trial;
+
+    for (trial = 0; trial < 64; trial++) {
+        BinkBits bits;
+        int cbits;
+        int q;
+        int i;
+        int bits_written;
+        int bits_counted;
+
+        memset(t, 0, sizeof(t));
+        /* sparse AC values; DC is bundled and must stay 0 here */
+        for (i = 1; i < 64; i++) {
+            seed = seed * 1103515245 + 12345;
+            if (((seed >> 16) & 3) == 0)
+                t[i] = (int16_t)(((seed >> 20) % 2047) - 1023);
+        }
+        if (trial == 0)
+            memset(t, 0, sizeof(t)); /* all-zero AC must round-trip too */
+
+        cbits = bink_enc_cbits(t);
+        bink_bw_init(&bw);
+        bits_written = bink_enc_emit_coeffs(&bw, t, cbits, trial & 15);
+        if (bits_written < 0) {
+            bink_bw_free(&bw);
+            return 1;
+        }
+        bits_counted = bink_enc_emit_coeffs(NULL, t, cbits, trial & 15);
+        if (bits_counted != bits_written) {
+            bink_bw_free(&bw);
+            return 1;
+        }
+        bink_bits_init(&bits, bink_bw_data(&bw),
+                       (size_t)((bits_written + 7) / 8));
+        q = bink_video_read_coeffs(&bits, back);
+        bink_bw_free(&bw);
+        if (q != (trial & 15))
+            return 1;
+        if (memcmp(t, back, sizeof(t)) != 0)
+            return 1;
+    }
+    return 0;
+}
+
+static int test_cbits(void)
+{
+    int16_t t[64];
+
+    memset(t, 0, sizeof(t));
+    if (bink_enc_cbits(t) != 0)
+        return 1;
+    t[5] = 1;
+    if (bink_enc_cbits(t) != 1)
+        return 1;
+    t[5] = -1023;
+    if (bink_enc_cbits(t) != 10)
+        return 1;
+    t[5] = 1024;
+    if (bink_enc_cbits(t) != 11)
+        return 1;
+    return 0;
+}
+
+static int test_quantize_rejects_out_of_range(void)
+{
+    double coef[64];
+    int16_t t[64];
+    const int32_t *quant = bink_enc_intra_quant(0);
+    int i;
+
+    memset(coef, 0, sizeof(coef));
+    for (i = 0; i < 64; i++)
+        coef[i] = 1.0e7;
+    return bink_enc_quantize(coef, quant, t) == 0 ? 1 : 0;
 }
 
 static int check_audio_samples(const char *path, unsigned frames,
@@ -1003,6 +1136,14 @@ int main(void)
     if (test_pictures() != 0)
         return 1;
     if (test_skip_and_motion() != 0)
+        return 1;
+    if (test_dct_roundtrip() != 0)
+        return 1;
+    if (test_coeff_writer_roundtrip() != 0)
+        return 1;
+    if (test_cbits() != 0)
+        return 1;
+    if (test_quantize_rejects_out_of_range() != 0)
         return 1;
     if (test_audio() != 0)
         return 1;
