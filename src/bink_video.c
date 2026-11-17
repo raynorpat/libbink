@@ -396,6 +396,7 @@ int bink_video_init(BinkVideo *v, unsigned long width, unsigned long height,
     v->height = height;
     v->version = version;
     v->has_alpha = (flags & BINK_FLAG_ALPHA) ? 1 : 0;
+    v->is_gray = (flags & BINK_FLAG_GRAY) ? 1 : 0;
     v->swap_planes = (version >= 'h');
 
     bink_plane_layout(width, height, 0, &v->plane_width[BINK_PLANE_Y],
@@ -1436,6 +1437,16 @@ static int decode_planes(BinkVideo *v, BinkBits *bits)
             return -1;
         if (bink_bits_left(bits) <= 0)
             break;
+    }
+    if (v->is_gray && plane < 2) {
+        /* A grayscale file may stop after luma. Neutral chroma keeps the
+         * picture gray; whatever the buffers held would tint it. A gray
+         * file that does carry chroma is decoded like any other. */
+        int i;
+
+        for (i = BINK_PLANE_U; i <= BINK_PLANE_V; i++)
+            memset(v->cur[i], 128,
+                   (size_t)v->stride[i] * (size_t)v->alloc_height[i]);
     }
     return 0;
 }

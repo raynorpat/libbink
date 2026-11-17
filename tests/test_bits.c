@@ -1,4 +1,5 @@
 #include "bink_bits.h"
+#include "bink_huffdata.h"
 #include "test_common.h"
 
 struct bitwriter {
@@ -220,8 +221,120 @@ static int test_bitwriter(void)
     return 0;
 }
 
+/* The constant lookup tables must be exactly what the code tables imply. */
+static int test_lookup_tables(void)
+{
+    int v, s, index;
+
+    for (v = 0; v < 16; v++) {
+        unsigned char syms[128];
+        unsigned char lens[128];
+
+        memset(syms, 0, sizeof(syms));
+        memset(lens, 0, sizeof(lens));
+        for (s = 0; s < 16; s++) {
+            int len = bink_tree_lens[v][s];
+            unsigned code = bink_tree_bits[v][s];
+            unsigned mask = (1u << len) - 1u;
+
+            for (index = 0; index < 128; index++) {
+                if (((unsigned)index & mask) == code) {
+                    syms[index] = (unsigned char)s;
+                    lens[index] = (unsigned char)len;
+                }
+            }
+        }
+        CHECK(memcmp(syms, bink_huff_lookup_syms[v], 128) == 0);
+        CHECK(memcmp(lens, bink_huff_lookup_lens[v], 128) == 0);
+    }
+    return 0;
+}
+
+/* Every width at every bit offset against a bit-at-a-time reference,
+ * including reads that end exactly at, and run past, the end. */
+static int test_reader_matches_bitwise(void)
+{
+    unsigned char data[23];
+    unsigned seed = 12345u;
+    size_t total = sizeof(data) * 8;
+    size_t start;
+    int count;
+    size_t i;
+
+    for (i = 0; i < sizeof(data); i++) {
+        seed = seed * 1103515245u + 12345u;
+        data[i] = (unsigned char)(seed >> 16);
+    }
+    for (start = 0; start <= total; start++) {
+        for (count = 0; count <= 30; count++) {
+            BinkBits bits;
+            int got;
+
+            bink_bits_init(&bits, data, sizeof(data));
+            bink_bits_skip(&bits, (int)start);
+            got = bink_bits_read(&bits, count);
+            if (start + (size_t)count > total) {
+                CHECK(got == -1);
+                CHECK(bits.bitpos == start);
+            } else {
+                unsigned long want = 0;
+                int b;
+
+                for (b = 0; b < count; b++) {
+                    size_t pos = start + (size_t)b;
+
+                    if (data[pos >> 3] & (1u << (pos & 7)))
+                        want |= 1UL << b;
+                }
+                CHECK(got == (int)want);
+                CHECK(bits.bitpos == start + (size_t)count);
+            }
+        }
+    }
+    return 0;
+}
+
+/* The writer at every offset and width, read back with the reader. */
+static int test_writer_matches_reader(void)
+{
+    unsigned seed = 777u;
+    int offset;
+    int count;
+
+    for (offset = 0; offset < 40; offset++) {
+        for (count = 1; count <= 30; count++) {
+            BinkBitWriter bw;
+            BinkBits bits;
+            unsigned value;
+            unsigned mask = (count == 32) ? ~0u : ((1u << count) - 1u);
+
+            seed = seed * 1103515245u + 12345u;
+            value = seed >> 1;
+            bink_bw_init(&bw);
+            CHECK(bink_bw_put(&bw, 0x15555555u, 30) == 0);
+            CHECK(bink_bw_put(&bw, 0, offset % 31) == 0);
+            /* High bits above count must not leak into the stream. */
+            CHECK(bink_bw_put(&bw, value, count) == 0);
+            CHECK(bink_bw_put(&bw, 0x2aaaaaaau, 30) == 0);
+            bink_bits_init(&bits, bink_bw_data(&bw), bink_bw_bytes(&bw));
+            CHECK(bink_bits_read(&bits, 30) == 0x15555555);
+            CHECK(bink_bits_read(&bits, offset % 31) == 0);
+            CHECK((unsigned)bink_bits_read(&bits, count) == (value & mask));
+            CHECK(bink_bits_read(&bits, 30) == 0x2aaaaaaa);
+            bink_bw_free(&bw);
+        }
+    }
+    return 0;
+}
+
 int main(void)
 {
+    if (test_lookup_tables() != 0)
+        return 1;
+    if (test_reader_matches_bitwise() != 0)
+        return 1;
+    if (test_writer_matches_reader() != 0)
+        return 1;
     if (test_bitreader() != 0)
         return 1;
     if (test_tree_read() != 0)

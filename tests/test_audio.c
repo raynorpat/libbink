@@ -1,7 +1,10 @@
 #include "bink.h"
+#include "bink_audio.h"
 #include "bink_internal.h"
 #include "reference_audio.h"
 #include "test_common.h"
+
+#include <math.h>
 
 static void w16(unsigned char *p, unsigned int v)
 {
@@ -543,8 +546,64 @@ static int test_pcm_hash_is_little_endian(void)
     return 0;
 }
 
+/* A packet whose last block ends a few bits short of a byte boundary, in
+ * a packet whose length is not a multiple of four, has trailing bits that
+ * cannot reach the next 32-bit boundary. The blocks before them are valid
+ * and must be published. */
+static int test_trailing_bits_keep_blocks(void)
+{
+    BinkAudioInfo info;
+    BinkAudioDct *dct;
+    BinkAudio *audio = NULL;
+    float samples[4096];
+    const float *channels[2];
+    int amp;
+    int found = 0;
+
+    CHECK(bink_audio_describe(44100, 1, 1, &info) == 0);
+    CHECK(info.frame_len <= 4096);
+    dct = bink_audio_dct_open(info.frame_len);
+    CHECK(dct != NULL);
+    channels[0] = samples;
+    channels[1] = samples;
+
+    for (amp = 1; amp <= 64 && !found; amp++) {
+        BinkBitWriter bw;
+        size_t bytes;
+        size_t block_bits;
+        int i;
+
+        for (i = 0; i < info.frame_len; i++)
+            samples[i] = (float)amp / 128.0f *
+                         (float)sin((double)i * 0.05 * (double)amp);
+        bink_bw_init(&bw);
+        CHECK(bink_bw_put(&bw, 0, 32) == 0);
+        CHECK(bink_audio_write_dct_block(&bw, &info, channels, dct) == 0);
+        block_bits = bink_bw_bitpos(&bw);
+        bytes = bink_bw_bytes(&bw);
+        if (block_bits % 8 != 0 && bytes % 4 != 0) {
+            unsigned long want = (unsigned long)(info.frame_len -
+                                                 info.overlap_len) * 2ul;
+
+            found = 1;
+            CHECK(bink_audio_create(&audio, 44100, 1, 1, 1ul << 20) == 0);
+            CHECK(bink_audio_decode(audio, bink_bw_data(&bw),
+                                    (unsigned long)bytes) == 0);
+            CHECK(bink_audio_pcm_bytes(audio) == want);
+            CHECK(bink_audio_pcm(audio) != NULL);
+            bink_audio_destroy(audio);
+        }
+        bink_bw_free(&bw);
+    }
+    bink_audio_dct_close(dct);
+    CHECK(found);
+    return 0;
+}
+
 int main(void)
 {
+    if (test_trailing_bits_keep_blocks() != 0)
+        return 1;
     if (test_pcm_hash_is_little_endian() != 0)
         return 1;
     if (test_synthetic_max_decoded() != 0)

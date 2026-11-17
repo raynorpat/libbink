@@ -29,7 +29,8 @@
 /** forward declaration for the opaque decoder object */
 typedef struct bink_t *bink;
 
-/** return codes from bink_first(), bink_next() and bink_seek_keyframe() */
+/** return codes from bink_first() and bink_next().
+    bink_seek_keyframe() is different: it returns 0 on success, -1 on failure. */
 #define BINK_DONE   0x00
 #define BINK_MORE   0x01
 #define BINK_LAST   0x02

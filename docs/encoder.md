@@ -50,6 +50,12 @@ Blocks are 8x8. Motion offsets are limited to -15..15 and to the decoder's
 reference window. There is no alpha, no gray flag, no scaled block, and no
 residue or run block.
 
+A residue writer exists (`bink_enc_emit_residue`) and is tested against
+the decoder's parser, but the block selector does not call it. Measured
+against the DCT candidates, which try eight quantizers per block, a
+residue block was never the cheaper coding. It would pay in a mode that
+fixes the quantizer; until one exists, selection stays off.
+
 Frame 0 is always a keyframe. `--keyframe-interval N` also marks frames
 `N`, `2N`, ... . `N` of 0 marks only frame 0. Keyframes do not use skip
 or motion.

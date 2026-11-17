@@ -45,7 +45,7 @@ size_t bink_bw_bitpos(const BinkBitWriter *bw);
 size_t bink_bw_bytes(const BinkBitWriter *bw);
 const unsigned char *bink_bw_data(const BinkBitWriter *bw);
 
-/** Build the static Huffman lookup tables (idempotent). */
+/** No-op: the Huffman lookup tables are constant data. Kept for callers. */
 void bink_huff_init(void);
 /** Read a tree descriptor from the bitstream. */
 int bink_tree_read(BinkBits *bits, BinkTree *tree);

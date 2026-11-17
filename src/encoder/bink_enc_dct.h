@@ -42,7 +42,13 @@ void bink_enc_unquantize(const int16_t t[64], const int32_t quant[64],
  * rejected there (and is unreachable through quantization). */
 int bink_enc_cbits(const int16_t t[64]);
 
-/* Write one RESIDUE payload: the 7-bit budget, the 3-bit top plane, and
+/* Not called by the block selector, on purpose: against this encoder's
+ * eight-quantizer DCT search a residue block never came out cheaper, so
+ * selection stays off (see docs/encoder.md). The writer is kept, and
+ * tested against the decoder's parser, for an encoder mode with a fixed
+ * quantizer, where residue does pay.
+ *
+ * Write one RESIDUE payload: the 7-bit budget, the 3-bit top plane, and
  * the bit-plane tree. residual is raster-ordered, each value in -255..255.
  * Returns the number of bits, or -1 when the block does not fit (a value
  * out of range, or more than 127 significant bits). bw == NULL counts

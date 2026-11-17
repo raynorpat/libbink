@@ -119,7 +119,9 @@ transform window. `bink_first` and `bink_seek_keyframe` clear that overlap
 before the landed frame. An empty chunk (`chunk_size == 0`) adds no samples
 and no silence, and it leaves the overlap in place. A chunk the bit reader
 cannot finish publishes nothing for that track and leaves the picture and
-the other tracks running.
+the other tracks running. Bits left after the last block that cannot
+reach the next 32-bit boundary are not an error: they are ignored and the
+blocks before them are published.
 
 ## Bitstream conventions
 

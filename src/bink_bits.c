@@ -1,14 +1,30 @@
 #include "bink_bits.h"
 #include "bink_huffdata.h"
 
+#include <limits.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define BINK_TREE_MAX_BITS 7
 
-static unsigned char huff_syms[16][1 << BINK_TREE_MAX_BITS];
-static unsigned char huff_lens[16][1 << BINK_TREE_MAX_BITS];
-static int huff_ready;
+/* Up to `count` bits (at most 32) starting at bit `pos`, LSB first. Bits
+ * past the end of the buffer read as zero. */
+static unsigned long peek_bits(const BinkBits *bits, size_t pos, int count)
+{
+    size_t byte = pos >> 3;
+    int shift = (int)(pos & 7);
+    int bytes = (shift + count + 7) >> 3;
+    uint64_t acc = 0;
+    int i;
+
+    for (i = 0; i < bytes && byte + (size_t)i < bits->size; i++)
+        acc |= (uint64_t)bits->data[byte + (size_t)i] << (8 * i);
+    acc >>= shift;
+    if (count < 32)
+        acc &= ((uint64_t)1 << count) - 1;
+    return (unsigned long)(acc & 0xffffffffu);
+}
 
 void bink_bits_init(BinkBits *bits, const unsigned char *data, size_t size)
 {
@@ -23,24 +39,22 @@ int bink_bits_left(const BinkBits *bits)
 
     if (bits->bitpos >= total)
         return 0;
+    /* A packet of 256 MB or more has more bits than an int can count. */
+    if (total - bits->bitpos > (size_t)INT_MAX)
+        return INT_MAX;
     return (int)(total - bits->bitpos);
 }
 
 int bink_bits_read(BinkBits *bits, int count)
 {
-    unsigned long value = 0;
-    int i;
+    unsigned long value;
+    size_t total = bits->size * 8;
 
     if (count < 0 || count > 30)
         return -1;
-    if ((size_t)count > bits->size * 8 - bits->bitpos)
+    if (bits->bitpos > total || (size_t)count > total - bits->bitpos)
         return -1;
-    for (i = 0; i < count; i++) {
-        size_t pos = bits->bitpos + (size_t)i;
-
-        if (bits->data[pos >> 3] & (1u << (pos & 7)))
-            value |= 1UL << i;
-    }
+    value = peek_bits(bits, bits->bitpos, count);
     bits->bitpos += (size_t)count;
     return (int)value;
 }
@@ -71,30 +85,8 @@ void bink_bits_align32(BinkBits *bits)
 
 void bink_huff_init(void)
 {
-    int v;
-    int s;
-    int index;
-
-    if (huff_ready)
-        return;
-
-    for (v = 0; v < 16; v++) {
-        memset(huff_syms[v], 0, sizeof(huff_syms[v]));
-        memset(huff_lens[v], 0, sizeof(huff_lens[v]));
-        for (s = 0; s < 16; s++) {
-            int len = bink_tree_lens[v][s];
-            unsigned int code = bink_tree_bits[v][s];
-            unsigned int mask = (1u << len) - 1u;
-
-            for (index = 0; index < (1 << BINK_TREE_MAX_BITS); index++) {
-                if ((index & mask) == code) {
-                    huff_syms[v][index] = (unsigned char)s;
-                    huff_lens[v][index] = (unsigned char)len;
-                }
-            }
-        }
-    }
-    huff_ready = 1;
+    /* The lookup tables are constant data; nothing to build. Kept so
+     * existing callers still link. */
 }
 
 static void merge(BinkBits *bits, unsigned char *dst, unsigned char *src,
@@ -195,32 +187,20 @@ int bink_tree_read(BinkBits *bits, BinkTree *tree)
 
 int bink_tree_decode(BinkBits *bits, const BinkTree *tree)
 {
-    unsigned int peek = 0;
-    size_t total;
-    int i;
+    unsigned int peek;
     int len;
-    int left;
 
     if (tree->vlc_num < 0 || tree->vlc_num > 15)
         return -1;
 
-    bink_huff_init();
-    total = bits->size * 8;
-    for (i = 0; i < BINK_TREE_MAX_BITS; i++) {
-        size_t pos = bits->bitpos + (size_t)i;
-
-        if (pos < total && (bits->data[pos >> 3] & (1u << (pos & 7))))
-            peek |= 1u << i;
-    }
-
-    len = huff_lens[tree->vlc_num][peek];
+    peek = (unsigned int)peek_bits(bits, bits->bitpos, BINK_TREE_MAX_BITS);
+    len = bink_huff_lookup_lens[tree->vlc_num][peek];
     if (len == 0)
         return -1;
-    left = bink_bits_left(bits);
-    if (len > left)
+    if (len > bink_bits_left(bits))
         return -1;
     bits->bitpos += (size_t)len;
-    return tree->syms[huff_syms[tree->vlc_num][peek]];
+    return tree->syms[bink_huff_lookup_syms[tree->vlc_num][peek]];
 }
 
 void bink_bw_init(BinkBitWriter *bw)
@@ -272,7 +252,8 @@ static int bink_bw_ensure(BinkBitWriter *bw, size_t bitpos)
 
 int bink_bw_put(BinkBitWriter *bw, unsigned value, int count)
 {
-    int i;
+    uint64_t acc;
+    size_t byte;
 
     if (bw == NULL || count < 0 || count > 32)
         return -1;
@@ -280,13 +261,13 @@ int bink_bw_put(BinkBitWriter *bw, unsigned value, int count)
         return 0;
     if (bink_bw_ensure(bw, bw->bitpos + (size_t)count) != 0)
         return -1;
-    for (i = 0; i < count; i++) {
-        size_t pos = bw->bitpos + (size_t)i;
-
-        if ((value >> i) & 1u)
-            bw->data[pos >> 3] =
-                (unsigned char)(bw->data[pos >> 3] | (1u << (pos & 7)));
-    }
+    acc = (uint64_t)value;
+    if (count < 32)
+        acc &= ((uint64_t)1 << count) - 1;
+    acc <<= bw->bitpos & 7;
+    /* Unwritten bits are zero, so OR-ing whole bytes is enough. */
+    for (byte = bw->bitpos >> 3; acc != 0; byte++, acc >>= 8)
+        bw->data[byte] = (unsigned char)(bw->data[byte] | (acc & 0xff));
     bw->bitpos += (size_t)count;
     return 0;
 }

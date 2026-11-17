@@ -161,7 +161,8 @@ pointer may be `NULL`.
   1,000,000 divided by the fps numerator), matching libsmacker's convention.
 - `flags` is the Bink video flags word. `BINK_FLAG_ALPHA` (`0x00100000`)
   means an alpha plane is present; `BINK_FLAG_GRAY` (`0x00020000`) marks
-  grayscale content.
+  grayscale content. When a grayscale file codes only luma, the U and V
+  planes are filled with 128, so `bink_get_video` returns gray pixels.
 - `track_mask` has bit `i` set when audio track `i` exists. `channels` is
   1 or 2, `bitdepth` is 16, and `audio_rate[i]` is the stream sample rate.
 
@@ -301,7 +302,8 @@ players use them for frame interpolation; see `docs/tools.md`.
 ## Thread safety
 
 A `bink` handle is not thread-safe. Use one handle per thread; separate
-handles may be used concurrently.
+handles may be used concurrently. The library has no global mutable
+state.
 
 ## Limitations
 

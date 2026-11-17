@@ -66,6 +66,16 @@ struct BinkAudio {
     unsigned long pcm_bytes;
     double *fft_re;
     double *fft_im;
+    /* Rotation factors, fixed by frame_len and computed once. Each entry
+     * is the float the transform used to compute per sample, so the
+     * output is unchanged. */
+    float *rdft_cos; /* [i] = cos(2*pi*i/n), i < n/4 */
+    float *rdft_sin;
+    float *dct_cos;  /* [i/2] = cos(pi*i/(2n)), even i < n */
+    float *dct_sin;
+    float *dct_csc;  /* [i] = 0.5/sin(pi*(2i+1)/(2n)), i < n/2 */
+    /* Overlap saved at the start of a packet, restored if it fails. */
+    float *saved_prev;
 };
 
 /* Decimation-in-time radix-2. inverse=0 is the forward sign. No 1/n. */
@@ -125,7 +135,8 @@ static void fft_transform(double *re, double *im, int n, int inverse)
  * Inverse real DFT, IDFT_C2R, matching FFmpeg 4.4 rdft_calc_c for the
  * transform DCT-III builds on. n is the number of real samples.
  */
-static void rdft_idft_c2r(float *data, int n, double *re, double *im)
+static void rdft_idft_c2r(float *data, int n, double *re, double *im,
+                          const float *tcos, const float *tsin)
 {
     int i;
     int n4 = n >> 2;
@@ -143,10 +154,9 @@ static void rdft_idft_c2r(float *data, int n, double *re, double *im)
         float od_im = k2 * (data[i2] - data[i1]);
         float ev_im = k1 * (data[i1 + 1] - data[i2 + 1]);
         float od_re = k2 * (data[i1 + 1] + data[i2 + 1]);
-        double angle = 2.0 * M_PI * (double)i / (double)n;
-        float tc = (float)cos(angle);
+        float tc = tcos[i];
         /* ff_cos_tabs mirrors so tsin[i] = sin(2*pi*i/n), not -sin. */
-        float ts = (float)sin(angle);
+        float ts = tsin[i];
         float sum_re;
         float sum_im;
 
@@ -178,7 +188,8 @@ static void rdft_idft_c2r(float *data, int n, double *re, double *im)
  * DFT_C2R, the transform FFmpeg 4.4 runs on a Bink RDFT block.
  * inverse unmangle with negative_sin, sign convention +1, forward FFT.
  */
-static void rdft_dft_c2r(float *data, int n, double *re, double *im)
+static void rdft_dft_c2r(float *data, int n, double *re, double *im,
+                         const float *tcos, const float *tsin)
 {
     int i;
     int n4 = n >> 2;
@@ -196,9 +207,8 @@ static void rdft_dft_c2r(float *data, int n, double *re, double *im)
         float od_im = k2 * (data[i2] - data[i1]);
         float ev_im = k1 * (data[i1 + 1] - data[i2 + 1]);
         float od_re = k2 * (data[i1 + 1] + data[i2 + 1]);
-        double angle = 2.0 * M_PI * (double)i / (double)n;
-        float tc = (float)cos(angle);
-        float ts = (float)sin(angle);
+        float tc = tcos[i];
+        float ts = tsin[i];
         float sum_re;
         float sum_im;
 
@@ -226,7 +236,7 @@ static void rdft_dft_c2r(float *data, int n, double *re, double *im)
 }
 
 /* FFmpeg dct_calc_III. n is the full frame length. src is consumed. */
-static void dct_iii(float *dst, float *src, int n, double *re, double *im)
+static void dct_iii(float *dst, float *src, int n, const BinkAudio *audio)
 {
     int i;
     float next = src[n - 1];
@@ -235,22 +245,21 @@ static void dct_iii(float *dst, float *src, int n, double *re, double *im)
     for (i = n - 2; i >= 2; i -= 2) {
         float val1 = src[i];
         float val2 = src[i - 1] - src[i + 1];
-        double angle = M_PI * (double)i / (double)(2 * n);
-        float c = (float)cos(angle);
-        float s = (float)sin(angle);
+        float c = audio->dct_cos[i >> 1];
+        float s = audio->dct_sin[i >> 1];
 
         src[i] = c * val1 + s * val2;
         src[i + 1] = s * val1 - c * val2;
     }
     src[1] = 2.0f * next;
 
-    rdft_idft_c2r(src, n, re, im);
+    rdft_idft_c2r(src, n, audio->fft_re, audio->fft_im, audio->rdft_cos,
+                  audio->rdft_sin);
 
     for (i = 0; i < n / 2; i++) {
         float tmp1 = src[i] * inv_n;
         float tmp2 = src[n - i - 1] * inv_n;
-        float csc = (0.5f / (float)sin(M_PI / (2.0 * n) * (double)(2 * i + 1))) *
-                    (tmp1 - tmp2);
+        float csc = audio->dct_csc[i] * (tmp1 - tmp2);
 
         tmp1 += tmp2;
         dst[i] = tmp1 + csc;
@@ -261,13 +270,18 @@ static void dct_iii(float *dst, float *src, int n, double *re, double *im)
 /* Samples are in the unit interval. FFmpeg's C converter is lrintf(x * 32768). */
 static int16_t float_to_s16(float x)
 {
-    long v = lrintf(x * 32768.0f);
+    float scaled = x * 32768.0f;
 
-    if (v > 32767)
+    /* Clamp before rounding: lrintf is undefined for a value that does
+     * not fit a long, which a corrupt stream can produce where long is
+     * 32 bits. NaN fails both comparisons and becomes silence. */
+    if (scaled >= 32767.0f)
         return 32767;
-    if (v < -32768)
+    if (scaled <= -32768.0f)
         return -32768;
-    return (int16_t)v;
+    if (scaled != scaled)
+        return 0;
+    return (int16_t)lrintf(scaled);
 }
 
 static int read_bits(BinkBits *bits, int count, int *err)
@@ -400,10 +414,45 @@ int bink_audio_create(BinkAudio **out, unsigned long rate, int channels,
         (size_t)audio->channels * (size_t)audio->frame_len, sizeof(float));
     audio->fft_re = (double *)malloc((size_t)audio->frame_len * sizeof(double));
     audio->fft_im = (double *)malloc((size_t)audio->frame_len * sizeof(double));
+    audio->saved_prev = (float *)malloc(
+        (size_t)audio->channels * (size_t)audio->overlap_len * sizeof(float));
+    {
+        size_t quarter = (size_t)audio->frame_len / 4;
+        size_t half = (size_t)audio->frame_len / 2;
+
+        audio->rdft_cos = (float *)malloc(quarter * sizeof(float));
+        audio->rdft_sin = (float *)malloc(quarter * sizeof(float));
+        audio->dct_cos = (float *)malloc(half * sizeof(float));
+        audio->dct_sin = (float *)malloc(half * sizeof(float));
+        audio->dct_csc = (float *)malloc(half * sizeof(float));
+    }
     if (audio->previous == NULL || audio->block == NULL ||
-        audio->fft_re == NULL || audio->fft_im == NULL) {
+        audio->fft_re == NULL || audio->fft_im == NULL ||
+        audio->saved_prev == NULL || audio->rdft_cos == NULL ||
+        audio->rdft_sin == NULL || audio->dct_cos == NULL ||
+        audio->dct_sin == NULL || audio->dct_csc == NULL) {
         bink_audio_destroy(audio);
         return -1;
+    }
+    {
+        int n = audio->frame_len;
+        int i;
+
+        for (i = 0; i < n / 4; i++) {
+            double angle = 2.0 * M_PI * (double)i / (double)n;
+
+            audio->rdft_cos[i] = (float)cos(angle);
+            audio->rdft_sin[i] = (float)sin(angle);
+        }
+        for (i = 0; i < n; i += 2) {
+            double angle = M_PI * (double)i / (double)(2 * n);
+
+            audio->dct_cos[i >> 1] = (float)cos(angle);
+            audio->dct_sin[i >> 1] = (float)sin(angle);
+        }
+        for (i = 0; i < n / 2; i++)
+            audio->dct_csc[i] =
+                0.5f / (float)sin(M_PI / (2.0 * n) * (double)(2 * i + 1));
     }
     bink_audio_reset(audio);
     *out = audio;
@@ -431,6 +480,12 @@ void bink_audio_destroy(BinkAudio *audio)
     free(audio->pcm);
     free(audio->fft_re);
     free(audio->fft_im);
+    free(audio->rdft_cos);
+    free(audio->rdft_sin);
+    free(audio->dct_cos);
+    free(audio->dct_sin);
+    free(audio->dct_csc);
+    free(audio->saved_prev);
     free(audio);
 }
 
@@ -503,10 +558,11 @@ static int decode_dct_block(BinkAudio *audio, BinkBits *bits, int16_t *dst,
             return -1;
         if (audio->use_dct) {
             coeffs[0] *= 2.0f;
-            dct_iii(out, coeffs, audio->frame_len, audio->fft_re, audio->fft_im);
+            dct_iii(out, coeffs, audio->frame_len, audio);
         } else {
             memcpy(out, coeffs, (size_t)audio->frame_len * sizeof(float));
-            rdft_dft_c2r(out, audio->frame_len, audio->fft_re, audio->fft_im);
+            rdft_dft_c2r(out, audio->frame_len, audio->fft_re, audio->fft_im,
+                         audio->rdft_cos, audio->rdft_sin);
         }
         if (!audio->first_block) {
             int j = ch;
@@ -562,7 +618,7 @@ int bink_audio_decode(BinkAudio *audio, const unsigned char *data,
                       unsigned long size)
 {
     BinkBits bits;
-    float *saved_prev = NULL;
+    float *saved_prev;
     int saved_first;
     unsigned long produced = 0;
     int block_bytes;
@@ -576,12 +632,7 @@ int bink_audio_decode(BinkAudio *audio, const unsigned char *data,
     }
 
     saved_first = audio->first_block;
-    saved_prev = (float *)malloc((size_t)audio->channels *
-                                 (size_t)audio->overlap_len * sizeof(float));
-    if (saved_prev == NULL) {
-        audio->pcm_bytes = 0;
-        return -1;
-    }
+    saved_prev = audio->saved_prev;
     memcpy(saved_prev, audio->previous,
            (size_t)audio->channels * (size_t)audio->overlap_len * sizeof(float));
 
@@ -607,8 +658,10 @@ int bink_audio_decode(BinkAudio *audio, const unsigned char *data,
         produced += (unsigned long)block_bytes;
         if (bink_bits_left(&bits) == 0)
             break;
+        /* Fewer bits than the padding to the next word cannot hold
+         * another block. Keep the blocks already decoded. */
         if (align32_exact(&bits) != 0)
-            err = 1;
+            break;
     }
 
     if (err || produced == 0) {
@@ -617,11 +670,9 @@ int bink_audio_decode(BinkAudio *audio, const unsigned char *data,
                    sizeof(float));
         audio->first_block = saved_first;
         audio->pcm_bytes = 0;
-        free(saved_prev);
         return -1;
     }
     audio->pcm_bytes = produced;
-    free(saved_prev);
     return 0;
 }
 

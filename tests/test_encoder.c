@@ -1195,6 +1195,150 @@ static int test_residue_writer_roundtrip(void)
     return 0;
 }
 
+/* A grayscale file may carry luma only. The chroma planes must then be
+ * neutral, on every frame, so the picture is gray and not tinted by
+ * whatever the plane buffers held. */
+static int test_gray_luma_only(void)
+{
+    enum { W = 32, H = 32 };
+    uint8_t frame[W * H * 3];
+    mem_source mem;
+    bink_enc_options opt;
+    char path[512];
+    char err[256];
+    FILE *fp;
+    unsigned char *file;
+    long size;
+    unsigned long offset;
+    const unsigned char *packet;
+    size_t packet_size;
+    size_t n;
+    size_t luma_only = 0;
+    BinkVideo full;
+    BinkVideo gray;
+    int pass;
+    int rc = 1;
+
+    fill_gradient(frame, W, H);
+    memset(&mem, 0, sizeof(mem));
+    mem.frames = frame;
+    mem.width = W;
+    mem.height = H;
+    mem.count = 1;
+    mem.fail_index = -1;
+    bink_enc_options_default(&opt);
+    path_for(path, sizeof(path), "gray.bik");
+    if (expect_ok(encode_mem(&mem, &opt, path, 0, err, sizeof(err)), err,
+                  "gray encode") != 0)
+        return 1;
+
+    fp = fopen(path, "rb");
+    if (fp == NULL)
+        return 1;
+    fseek(fp, 0, SEEK_END);
+    size = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    file = (unsigned char *)malloc((size_t)size);
+    if (file == NULL || fread(file, 1, (size_t)size, fp) != (size_t)size) {
+        fclose(fp);
+        free(file);
+        return 1;
+    }
+    fclose(fp);
+    remove(path);
+
+    offset = read_u32(file + 44) & ~1ul;
+    packet = file + offset;
+    packet_size = (size_t)size - offset;
+
+    if (bink_video_init(&full, W, H, 0, 'i') != 0 ||
+        bink_video_init(&gray, W, H, BINK_FLAG_GRAY, 'i') != 0) {
+        fprintf(stderr, "FAIL gray: init\n");
+        free(file);
+        return 1;
+    }
+    if (bink_video_decode(&full, packet, packet_size) != 0) {
+        fprintf(stderr, "FAIL gray: full decode\n");
+        goto done;
+    }
+    /* Planes end on 32-bit boundaries, so the shortest prefix that decodes
+     * is the luma plane alone. */
+    for (n = 4; n < packet_size; n += 4) {
+        bink_video_reset(&gray);
+        if (bink_video_decode(&gray, packet, n) == 0) {
+            luma_only = n;
+            break;
+        }
+    }
+    if (luma_only == 0) {
+        fprintf(stderr, "FAIL gray: no luma-only prefix decodes\n");
+        goto done;
+    }
+    /* Two more frames so both halves of the plane ping-pong are covered. */
+    for (pass = 0; pass < 3; pass++) {
+        const unsigned char *rgb;
+        int plane;
+        int x, y;
+
+        if (pass > 0 && bink_video_decode(&gray, packet, luma_only) != 0) {
+            fprintf(stderr, "FAIL gray: pass %d decode\n", pass);
+            goto done;
+        }
+        for (plane = BINK_PLANE_U; plane <= BINK_PLANE_V; plane++) {
+            const unsigned char *p = bink_video_plane(&gray, plane);
+            int stride = bink_video_stride(&gray, plane);
+
+            for (y = 0; y < H / 2; y++) {
+                for (x = 0; x < W / 2; x++) {
+                    if (p[y * stride + x] != 128) {
+                        fprintf(stderr,
+                                "FAIL gray: pass %d plane %d is %d at %d,%d\n",
+                                pass, plane, p[y * stride + x], x, y);
+                        goto done;
+                    }
+                }
+            }
+        }
+        for (y = 0; y < H; y++) {
+            if (memcmp(bink_video_plane(&gray, BINK_PLANE_Y) +
+                           y * bink_video_stride(&gray, BINK_PLANE_Y),
+                       bink_video_plane(&full, BINK_PLANE_Y) +
+                           y * bink_video_stride(&full, BINK_PLANE_Y),
+                       W) != 0) {
+                fprintf(stderr, "FAIL gray: luma differs on row %d\n", y);
+                goto done;
+            }
+        }
+        rgb = bink_video_rgb(&gray);
+        for (x = 0; rgb != NULL && x < W * H; x++) {
+            if (rgb[x * 3] != rgb[x * 3 + 1] ||
+                rgb[x * 3] != rgb[x * 3 + 2]) {
+                fprintf(stderr, "FAIL gray: pixel %d is tinted\n", x);
+                goto done;
+            }
+        }
+        if (rgb == NULL)
+            goto done;
+    }
+
+    /* A gray-flagged file that does carry chroma decodes it normally. */
+    bink_video_reset(&gray);
+    if (bink_video_decode(&gray, packet, packet_size) != 0 ||
+        memcmp(bink_video_plane(&gray, BINK_PLANE_U),
+               bink_video_plane(&full, BINK_PLANE_U),
+               (size_t)bink_video_stride(&full, BINK_PLANE_U) * (H / 2)) != 0) {
+        fprintf(stderr, "FAIL gray: coded chroma was not kept\n");
+        goto done;
+    }
+    rc = 0;
+
+done:
+    bink_video_uninit(&full);
+    bink_video_uninit(&gray);
+    free(file);
+    return rc;
+}
+
 static int test_dct_roundtrip(void)
 {
     /* gradient, hard edge, flat, and pseudo-random blocks */
@@ -2778,6 +2922,8 @@ int main(void)
     CHECK(opt.keyframe_interval == 150);
     CHECK(opt.motion_range == 8);
     if (test_pictures() != 0)
+        return 1;
+    if (test_gray_luma_only() != 0)
         return 1;
     if (test_skip_and_motion() != 0)
         return 1;

@@ -46,6 +46,7 @@ typedef struct BinkVideo {
     unsigned long height;
     int version;
     int has_alpha;
+    int is_gray;
     int swap_planes;
 
     unsigned char *cur[4];
